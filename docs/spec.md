@@ -643,7 +643,9 @@ program and starting again would ask everyone the same things twice.
 - **Requests that can be identical must be told apart.** If an edit puts a
   request in front of an identical one, the new one takes the old answer. A
   program that can make two identical requests must distinguish them by what
-  they are about or by a name. The checker does not enforce this yet.
+  they are about or by their words. The checker refuses two such requests
+  when both are written with literals (`same-request`); it cannot see two
+  whose texts are computed.
 
 **What this costs.** A pass reads the whole history of its program, and the
 evaluator must give the same result across versions, or upgrades must be
@@ -764,8 +766,9 @@ from projection.
    - (a) Each scope has one authority, and authorities co-operate through
      authenticated messages. This is the current assumption.
    - (b) Waiting programs live on participants' own machines.
-4. **Identity under edits.** How the checker finds requests that can be
-   identical, and how a name for a long-lived request is written.
+4. **Identity under edits.** How the checker finds requests whose computed
+   texts can be identical, and how a name for a long-lived request is
+   written.
 5. **Concrete syntax details.**
    - Time literals.
    - `?` on nested replies.

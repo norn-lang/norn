@@ -52,7 +52,7 @@ let q = ask(@a, "x") == ask(@a, "y")`), {
 
 test("deadline: ~by, waitUntil and after take a time or a duration, not a string", () => {
   assert.deepEqual(types(`let a = ask(@alice, "q", ~by=1h)->wait
-let b = ask(@alice, "q", ~by=2026-11-07T12:00Z)->wait
+let b = ask(@bob, "q", ~by=2026-11-07T12:00Z)->wait
 let w = (x, d) => x->waitUntil(d)
 let c = w(merged("acme/api#1"), 1d)
 let e = after(2026-11-07T12:00Z)

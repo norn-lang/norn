@@ -205,6 +205,8 @@ export class Checker {
   /** Each direct call of `run`, with the type of its report (§5a). */
   private readonly runs: { node: A.Call | A.Pipe; report: Type }[] = [];
   readonly reports: { node: A.Call | A.Pipe; form: ReportForm }[] = [];
+  /** Each direct request to a participant whose arguments are all literals, by what it asks of whom (spec §11.2). */
+  private readonly literalRequests = new Map<string, A.Call | A.Pipe>();
   /** The program's last expression, if it has one: it must not be a request (§6a). */
   private programValue: { node: A.Expression; type: Type } | null = null;
   /** Errors in patterns so far, to skip the analysis of a match whose patterns are wrong. */
@@ -609,6 +611,32 @@ export class Checker {
     return instantiate(entry.type, this.level);
   }
 
+  /**
+   * Two requests that ask the same participant for the same thing are told
+   * apart only by their order of evaluation. An edit that moved one would
+   * give it the other's answer, so the program must tell them apart itself.
+   * Only calls written entirely with literals can be compared here.
+   */
+  private sameRequest(node: A.Call | A.Pipe, name: string, first: A.Expression | null, args: readonly A.Argument[]): void {
+    const asked = [...(first === null ? [] : [first]), ...args.filter((arg) => !(arg.kind === "LabelledArg" && arg.label === "by"))];
+    const pending: unknown[] = [...asked];
+    for (let part = pending.pop(); part !== undefined; part = pending.pop()) {
+      if (Array.isArray(part)) pending.push(...part);
+      else if (typeof part === "object" && part !== null) {
+        if ("kind" in part && !LITERAL_KINDS.has(part.kind as string)) return;
+        for (const [key, child] of Object.entries(part)) if (key !== "span") pending.push(child);
+      }
+    }
+    const key = JSON.stringify([name, asked], (field, value: unknown) => (field === "span" ? undefined : value));
+    const earlier = this.literalRequests.get(key);
+    if (earlier === undefined) { this.literalRequests.set(key, node); return; }
+    this.error(
+      "same-request",
+      `this ${name} asks the same participant for the same thing as the one at ${position(earlier.span)}; identical requests are told apart only by their order, so an edit that moved one would give it the other's answer: say what each is about with ~about, or word them differently`,
+      node.span,
+    );
+  }
+
   /** The report type of `run`, given the type of one use of it. */
   private reportOf(run: Type): Type {
     const request = resolve((resolve(run) as TFun).result) as TCon;
@@ -653,6 +681,7 @@ export class Checker {
       for (const arg of args) this.infer(arg.kind === "LabelledArg" ? arg.value : arg);
       return newVar(this.level);
     }
+    if (name !== null && callee.binding?.origin === "builtin" && ["ask", "confirm", "choose", "run"].includes(name)) this.sameRequest(node, name, first?.expression ?? null, args);
     if (isBuiltin(callee, "run")) {
       // One call, one form: the report's type is never generalized, so every use of the enclosing function agrees on it.
       const report = this.reportOf(shape);
@@ -1449,6 +1478,12 @@ const CLASSES: { readonly [C in ClassName]: { code: Code; name: string; members:
 };
 
 /** Calls, pipes, field accesses, `?`, prefix and binary operators: the inner link of each, or null. */
+/** The node kinds of an expression that is the same value wherever it is written. */
+const LITERAL_KINDS = new Set([
+  "StringLiteral", "IntLiteral", "FloatLiteral", "BoolLiteral", "UnitLiteral", "TimeLiteral", "DurationLiteral", "RefLiteral",
+  "ParticipantLiteral", "Constructor", "TupleLiteral", "ListLiteral", "RecordLiteral", "RecordField", "LabelledArg",
+]);
+
 function spineChild(node: A.Expression): A.Expression | null {
   switch (node.kind) {
     case "Pipe":

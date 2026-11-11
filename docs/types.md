@@ -502,6 +502,7 @@ error: this switch does not handle Refused(_) or Revoked at examples/decide.norn
 | `or-pattern-bindings` | error | alternatives of a pattern that bind different names |
 | `later-parameter` | error | a default value that uses a labelled parameter declared after it |
 | `choose-options` | error | options of `choose` that are not constructors of one variant type |
+| `same-request` | error | two requests that ask the same participant for the same thing, with nothing to tell them apart (spec §11.2) |
 | `report-form` | error | a `run` whose report would hold a function, a request, a fact, a stream or a reply |
 | `try-operand` | error | `?` on a value that is not a reply, option or result |
 | `try-return` | error | `?` in a function that returns another family |

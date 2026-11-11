@@ -76,3 +76,17 @@ test("elaborate writes each run's form into a copy of the program", () => {
   assert.match(elaborated, /"label":"form"/);
   assert.match(elaborated, /Flawed/);
 });
+
+test("two requests that ask the same participant for the same thing must be told apart", () => {
+  const twice = `ignore(ask(@alice, "OK?")->wait)\nignore(ask(@alice, "OK?", ~by=1h)->wait)`;
+  assert.match(message(twice, "same-request"), /the one at 1:8.*~about/);
+  // What each is about, another participant, other words or a computed text tell them apart.
+  reports(`let pr = merged("acme/api#1")->wait
+ignore(ask(@alice, "OK?", ~about=pr)->wait)
+ignore(ask(@alice, "OK?")->wait)
+ignore(ask(@bob, "OK?")->wait)
+ignore(confirm(@alice, "OK?")->wait)
+let again = n => ask(@alice, \`OK \${n->show}?\`)->wait
+ignore(again(1))
+ignore(again(2))`);
+});

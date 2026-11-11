@@ -83,6 +83,7 @@ a stable `code`.
 | `not-handled` | A `forEach` handler returns something other than `()` or a reply. | Return the reply (`->wait`), or wrap the call in `ignore`. |
 | `unknown-name`, `unknown-label`, `unknown-constructor` | A name is not bound. | For `remind`, `decide` and the other Std functions, add `open Std`. For a fact or stream, check that the host interface declares it. For a removed name, the message says what replaced it. |
 | `choose-options` | The options of `choose` mix types or are not constructors. | Declare `type choice = A \| B` and pass `[A, B]`. For yes or no, use `confirm`. |
+| `same-request` | Two requests ask the same participant for the same thing. They would be told apart only by their order. | Add `~about=` to each, or word them differently. |
 | `report-form` | A `run`'s report would hold a function, a request, a fact, a stream or a reply. | Report data: text, numbers, lists, records, variants. If the message names a reply, a function uses `?` on the run and returns the bare value: end it with `Answered(value)`. |
 | `not-a-deadline` | `~by` or `waitUntil` is given something other than a time or a duration. | Use `2026-11-07T12:00Z` or `1h`. |
 | `refutable-pattern` | A `let` pattern can fail to match. | Use `switch`. |
