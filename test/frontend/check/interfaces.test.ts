@@ -92,9 +92,9 @@ ignore(f)`, { host, std });
   assert.deepEqual(Object.fromEntries(result.bindings.map(({ name, type }) => [name, type])), {
     t: "ticket", u: "update", s: "string", f: "option<int>", r: "report",
   });
-  // Without the reference host there is no merged, and report has no fields.
+  // Without the reference host there is no merged, and no record type with a text field for a report to be.
   const other = checkSource(`ignore(merged("x"))\nlet r = run(@auto, "x")->wait?\nignore(r.text)`, { host, std });
-  assert.deepEqual(other.diagnostics.map((d) => d.code), ["unknown-name", "type-mismatch"]);
+  assert.deepEqual(other.diagnostics.map((d) => d.code), ["unknown-name", "unknown-field"]);
 });
 
 test("open Std brings the standard library in; without it, its names are unknown", () => {

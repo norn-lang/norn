@@ -161,7 +161,7 @@ export class Runtime {
       }
     }
     const { name, args, labels } = effect;
-    const declaredLabels: Record<string, string[]> = { ask: ["by"], confirm: ["by"], choose: ["by"], run: ["context", "by"],
+    const declaredLabels: Record<string, string[]> = { ask: ["by", "about"], confirm: ["by", "about"], choose: ["by", "about"], run: ["context", "by", "about", "form"],
       wait: [], waitUntil: [], cancel: [], handOver: [], status: [], say: [], judge: ["about"] };
     for (const label of Object.keys(labels)) if (!declaredLabels[name]?.includes(label)) throw new ProgramError(`Unknown ${name} label ${label}`);
     if (name === "choose" && (args[2]?.type !== "list" || !args[2].values.length || args[2].values.some(v => v.type !== "variant"))) {

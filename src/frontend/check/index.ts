@@ -15,6 +15,8 @@
 export { FAMILIES, type Family } from "./builtins.ts";
 export { CODES, type CheckDiagnostic, type Code, type Severity } from "./diagnostics.ts";
 export type { EffectSummary } from "./effects.ts";
+export { elaborate } from "./elaborate.ts";
+export type { Form, FormDefinition, ReportForm } from "./forms.ts";
 export { checkProgram, loadLibrary, type CheckOptions, type CheckResult, type Library } from "./infer.ts";
 export { builtinInterface, loadInterface, type HostInterface, type ValueBinding } from "./interface.ts";
 export { checkSource, readInterface, readLibrary, type SourceCheck } from "./source.ts";

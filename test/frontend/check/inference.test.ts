@@ -79,7 +79,7 @@ test("a call gives every positional argument and every required label, and only 
   );
   assert.equal(message(`${define}ignore(f(~b=1))`, "argument-count"), "expected 1 positional argument for f, found 0; its type is (int, ~b: int, ~c: int=?) => int");
   assert.equal(message(`${define}ignore(f(1, ~b=1, ~d=2))`, "unknown-label"), "f has no labelled argument ~d; it takes ~b and ~c");
-  assert.equal(message(`ignore(run(@alice, "q", ~contxt=1)->wait)`, "unknown-label"), "run has no labelled argument ~contxt; it takes ~context and ~by; did you mean ~context?");
+  assert.equal(message(`ignore(run(@alice, "q", ~contxt=1)->wait)`, "unknown-label"), "run has no labelled argument ~contxt; it takes ~context, ~by and ~about; did you mean ~context?");
   assert.equal(message(`${define}ignore(f(1, ~b=1, ~b=2))`, "duplicate-label"), "~b is passed twice");
   assert.equal(message("let g = x => x\nignore(g(1, ~b=1))", "unknown-label"), "g has no labelled argument ~b; it takes no labelled arguments");
   // The value before -> counts as the first argument.
@@ -210,8 +210,8 @@ test("records: unknown fields, missing fields and duplicates are errors", () => 
   assert.equal(message(`${box}let b = {value: 1, label: "x"}\nignore({...b, label: 3})`, "type-mismatch"), "expected string for the field label of box, found int");
   assert.equal(message(`${box}ignore({value: 1, value: 2, label: "x"})`, "duplicate-field"), "the field value is given twice");
   assert.equal(message("ignore(x => x.nowhere)", "unknown-field"), "unknown field nowhere: no record type has it");
-  assert.equal(message("ignore(run(@auto, \"x\").text)", "type-mismatch"), "expected a record with the field text, found request<report>; wait for the request first, with ->wait");
-  assert.equal(message("ignore(run(@auto, \"x\")->wait.text)", "type-mismatch"), "expected a record with the field text, found reply<report>; take the value out first, with ? or switch");
+  assert.equal(message("ignore(run(@auto, \"x\").text)", "type-mismatch"), "expected a record with the field text, found request<'a>; wait for the request first, with ->wait");
+  assert.equal(message("ignore(run(@auto, \"x\")->wait.text)", "type-mismatch"), "expected a record with the field text, found reply<'a>; take the value out first, with ? or switch");
   assert.equal(message("type r = {f: int, f: string}", "duplicate-field"), "the field f is declared twice in r");
 });
 
