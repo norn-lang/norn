@@ -21,6 +21,10 @@ export interface LedgerRequest {
   candidates: string[] | null;
   epoch: number;
   text: string;
+  /** What the request is about (`~about`), as a message shows it; null when the program named nothing. */
+  about: string | null;
+  /** What a `run` was given to work from (`~context`), as a message shows it. */
+  context: string | null;
   /** What `choose` offers; null for every other verb. */
   options: Value[] | null;
   /** What a `run` must report, when the checker decided it (docs/types.md §5a); null means the host's report. */
@@ -197,6 +201,19 @@ function candidatesOf(who: Value): string[] | null {
   if (!group.length) throw new ProgramError("anyOf leaves nobody to take the request");
   return [...new Set(group)];
 }
+/**
+ * Whoever may stop the program stops it from outside: what it left open is
+ * cancelled and it ends failed, in one step. Returns the requests it closed;
+ * a program that has already ended keeps its result.
+ */
+export function stop(ledger: Ledger, now: number, reason: string): LedgerRequest[] {
+  if (ledger.ended) return [];
+  settleDue(ledger, now);
+  const closed = Object.values(ledger.requests).filter(request => request.reply === null);
+  for (const request of closed) { request.reply = { tag: "Cancelled" }; request.settledAt = now; }
+  ledger.ended = { at: now, status: "failed", result: null, error: reason };
+  return closed;
+}
 export function establish(ledger: Ledger, fact: Value, value: Value, now: number): void {
   ledger.facts[external(fact, "fact", "establish")] ??= { at: now, value };
 }
@@ -291,6 +308,7 @@ export function* slices(code: Code, source: Ledger, now: number, options: PassOp
         if (!permitted()) return revoked();
         request = ledger.requests[id] = {
           id, verb: name, holder, candidates: name === "judge" ? null : candidatesOf(args[0]), epoch: 0, text: question.value,
+          about: labels.about ? show(labels.about) : null, context: labels.context ? show(labels.context) : null,
           options: choices?.type === "list" ? choices.values : null,
           form: labels.form?.type === "string" ? JSON.parse(labels.form.value) as ReportForm : null,
           by: instant(labels.by, now), openedAt: now, reply: null, settledAt: null, detached: false,
