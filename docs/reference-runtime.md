@@ -60,6 +60,12 @@ The `Pass` it returns says what was new:
 - `nextDue`: the earliest time at which another pass could make progress by
   the clock alone.
 
+An opened request carries, besides its text, what it is `about` and the
+`context` a `run` was given, each as a message shows it, so a host can put
+them in front of whoever holds the request. `stop(ledger, now, reason)` ends
+a program from outside: it cancels what the program left open and records
+the program as failed with that reason, in one step.
+
 A pass reads the ledger when it starts and writes it only when it finishes. A
 pass that throws (a policy that cannot answer, for instance) leaves the ledger
 exactly as it was, so a crash, a restart or a second worker is only another

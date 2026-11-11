@@ -5,7 +5,7 @@ import { parse } from "../../src/frontend/parser.ts";
 import { checkSource, elaborate } from "../../src/frontend/check/index.ts";
 import { referenceOptions } from "../../src/frontend/check/node.ts";
 import { compile } from "../../src/runtime/code.ts";
-import { emptyLedger, establish, evaluate, occur, settle, take, type Ledger, type Reply } from "../../src/runtime/ledger.ts";
+import { emptyLedger, establish, evaluate, occur, settle, stop, take, type Ledger, type Reply } from "../../src/runtime/ledger.ts";
 import { text, variant, type Value } from "../../src/runtime/value.ts";
 
 const HOUR = 3_600_000;
@@ -315,4 +315,24 @@ all([run(@claude, "Part one"), run(@codex, "Part two")])`);
   settle(joined, two.id, "@codex", answered(report("two")), 1);
   settle(joined, one.id, "@claude", { tag: "Refused", reason: "busy" }, 2);
   assert.deepEqual(evaluate(both, joined, 2).result, { type: "list", values: [variant("Refused", text("busy")), variant("Answered", report("two"))] });
+});
+
+test("a request carries what it is about and what it was given, as a message shows them", () => {
+  const code = program(`let draft = "v2 of the plan"
+run(@codex, "Find what does not hold", ~about=doc"plan", ~context=draft)->wait`);
+  const ledger = emptyLedger();
+  const [request] = evaluate(code, ledger, 0).opened;
+  assert.deepEqual([request.about, request.context], [`doc"plan"`, "v2 of the plan"]);
+});
+
+test("a program stopped from outside ends failed and cancels what it left open", () => {
+  const code = program(`ask(@alice, "Ship it?")->wait`);
+  const ledger = emptyLedger();
+  const [request] = evaluate(code, ledger, 0).opened;
+  assert.deepEqual(stop(ledger, 5, "Stopped in the conversation").map(closed => closed.id), [request.id]);
+  assert.deepEqual(ledger.requests[request.id].reply, { tag: "Cancelled" });
+  const after = evaluate(code, ledger, 6);
+  assert.deepEqual([after.status, after.error, after.opened.length], ["failed", "Stopped in the conversation", 0]);
+  assert.equal(settle(ledger, request.id, "@alice", { tag: "Answered", value: text("yes") }, 7), false);
+  assert.deepEqual(stop(ledger, 8, "again"), []);
 });
