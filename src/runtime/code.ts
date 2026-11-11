@@ -3,7 +3,7 @@ import { astToJson, astFromJson } from "../frontend/json.ts";
 import { sha256 } from "./sha256.ts";
 import { linkStd, requireLinked } from "./std.ts";
 
-/** Pinned code is kept separately from a serializable machine checkpoint. */
+/** A program ready to evaluate: its frozen AST, with stable node IDs and a content identity. */
 export interface Code {
   id: string;
   ast: string;

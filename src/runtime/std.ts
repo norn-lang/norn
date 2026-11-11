@@ -1,7 +1,7 @@
 import { astFromJson, astToJson } from "../frontend/json.ts";
 import type { Pattern, Program, Statement, TopLevelItem } from "../frontend/ast.ts";
 
-/** Link a private Std module into ordinary AST, so its exact definitions travel with checkpoints. */
+/** Link a private Std module into ordinary AST, so the program carries the exact definitions it was compiled with. */
 export function linkStd(program: Program, std?: Program): Program {
   if (!program.body.some(node => node.kind === "Open")) return program;
   if (!std) throw new Error("open Std needs a pinned library AST: compile(program, {std: stdProgram})");

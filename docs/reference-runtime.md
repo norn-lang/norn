@@ -1,123 +1,174 @@
-# Reference machine and simulated host
+# Reference runtime: the ledger and a simulated team
 
-> Since 2026-11-11 the durable state of Norn is a ledger of requests, and a
-> program is a pure computation over it (spec §9, §11.2). The ledger runtime
-> is `src/runtime/ledger.ts`; see [The ledger runtime](#the-ledger-runtime)
-> below. The stored-state driver described first (`Runtime`, `DurableStore`,
-> the SQLite and memory stores, `SimulatedHost`) still runs the playground and
-> most tests, and is removed once they run on the ledger runtime.
+The durable state of Norn is a ledger of requests, and a program is a pure
+computation over it (spec §9, §11.2). The reference runtime is three small
+modules under `src/runtime`:
 
-For the session-local memory adapter and `open Std`, see the
-[browser runtime](browser-runtime.md). SQLite remains the Node persistence
-adapter; importing the browser entry does not load it.
+- `machine.ts` executes the versioned AST of `src/frontend/ast.ts`, one time
+  slice at a time, and stops at each effect;
+- `ledger.ts` holds the `Ledger` and evaluates a program against it: one
+  *pass*;
+- `team.ts` is a simulated team with a virtual clock, for tests and the
+  playground.
 
-The reference machine executes the versioned AST in `src/frontend/ast.ts`.
-`compile` pins its JSON document by SHA-256 and assigns deterministic node IDs.
-The canonical AST is stored immutably by its hash. `Runtime.restore` reloads
-that artifact rather than reparsing source with a newer parser. The compiler
-also freezes a private AST copy so later caller mutations cannot change pinned
-code. The machine stores control, continuation frames and lexical environments
-as JSON; closures contain a code node ID and environment ID. No native function
-or native stack is persisted. Reload the same code identity and machine ABI to
-resume it. Freezing and numbering use explicit work stacks for deep trees.
-Restoration hashes the original stored JSON bytes without running them through
-a newer writer, so whitespace changes cannot replace an existing identity.
+There is no stored machine state, no machine ABI version, no store schema and
+no pinned code identity. The stored-state driver, its SQLite and memory stores
+and its dispatch outbox were removed on 2026-11-11.
 
-`advance` evaluates a finite time slice. Exhausting that slice yields a ready
-machine, not a failed program. Tail calls discard completed sequence frames, and
-unreachable environments are collected before checkpointing. Integers are
-arbitrary precision decimal strings; floating values use explicit strings so
-negative zero survives JSON. Non-finite arithmetic results fail visibly.
+## The machine
 
-The machine supports immutable bindings, mutually recursive functions, labelled
-arguments/defaults, variants, records, lists, tuples, interpolation,
-expressions, guards, patterns, pipes, short-circuiting and function-local `?`.
-Its `Effect` value is a suspension description, not permission to perform an
-action.
+`compile` gives a program's AST deterministic node IDs and a SHA-256 identity,
+and links `open Std` (below). `start` and `advance` evaluate it with explicit
+control, continuation frames and lexical environments, so deep programs need
+no native stack. `advance` runs a finite slice; running out of it is not a
+failure. Tail calls discard completed sequence frames, and unreachable
+environments are collected after each slice. Integers are arbitrary-precision
+decimal strings; floating values use explicit strings so negative zero
+survives JSON. Non-finite arithmetic results fail visibly.
 
-`Runtime` drives that machine through `DurableStore`. Participant requests,
-request assignment changes, waits and outgoing messages are committed with the
-continuation under the checkpoint revision check. A worker that loses the check
-cannot dispatch its abandoned intents. Temporary host/policy/storage failures
-propagate without changing a checkpoint. Program errors commit an explicit
-`{kind: "error", message}` machine state and an `execution.failed` notification
-whose arguments are `{kind: "program-error", message}`. They never become
-participant `Broke` replies. `fail(Answered(x))` is also a program error.
-Request answers and wait outcomes are independent, including after timeouts and
-handover. The host's `Policy` is required and is consulted for effects; a real
-transport must check current permissions again at delivery.
+The machine supports immutable bindings, mutually recursive functions,
+labelled arguments and defaults, variants, records, lists, tuples,
+interpolation, guards, patterns, pipes, short-circuiting and function-local
+`?`. Its `Effect` value describes what the program asks for. It is not
+permission to do it, and the machine never performs it: `ledger.ts` answers
+each effect and resumes the machine. A machine lives for one pass and is never
+stored.
 
-`SimulatedHost` never starts an agent or contacts an external service. It shares
-a `VirtualClock` injected into the SQLite store, advanced by `advanceTo`, and
-scripted replies go through the same request ID/epoch checks. Use `reply` and
-`emit` to supply inputs, then `pump` to run ready programs and expose simulated
-messages. On restart, supply the same pinned code, store and current host clock;
-the deadlines and subscription positions are already persisted. The store owns
-observation time and persists its monotonic floor. External event timestamps
-remain data. Hosts cannot pass a new clock value with a reply.
+## A pass
 
-This is an incremental prototype, not the entire draft specification. Request
-and event waits, tagged alternatives, one-shot timers, message effects and
-scripted judging are implemented. Stream `map`/`filter`, durable structured
-`scope`, configurable concurrent/coalescing stream processing, child programs,
-real agent transports and host authorization integration are not implemented.
-Unsupported operations fail visibly. The initial `forEach` machine helper is
-sequential and rearms a relative timer after each callback; it does not claim
-fixed-cadence or coalescing semantics. A production host also needs an alarm
-adapter; advancing the virtual clock is not a background polling service.
+`evaluate(code, ledger, now, options)` starts the machine from the top,
+answers each effect from the ledger, and stops at the first wait whose result
+is not recorded yet. Where the program makes a request the ledger holds, it
+gets that request back; where it makes one the ledger lacks, the request is
+opened. A request's identity is a digest of its verb, holder, arguments and
+labels other than `~by`, with its ordinal among identical requests in
+evaluation order. When a wait began, how it ended, what was said, what a
+`status` read saw and which `forEach` handler failure was reported are ledger
+entries, so a later pass takes the same path.
 
-An unsuccessful `forEach` handler reply (`Refused`, `Broke`, `NoReply`,
-`Cancelled` or `Revoked`) atomically queues an `execution.handler_failed`
-notification for the host to deliver to the program's author. Its continuation
-then listens for the next occurrence. A crash cannot advance past reporting
-without the notification intent, or create that intent twice for the same
-checkpoint. The simulated host records only a simulated delivery receipt;
-real author routing remains the production host's responsibility. Handlers receive the original event value. Unit and
-`Answered(_)` rearm without a notification. Unchecked callbacks returning another
-type discard the value; the typing rules reject them unless wrapped in
-`ignore(x)`. `ignore` evaluates its argument and yields unit, so it can
-explicitly discard an outcome as well. Calling `fail(o)` still terminates the
-program and queues the terminal failure notice.
+The `Pass` it returns says what was new:
 
-The same rule applies at the program boundary: a final unsuccessful reply
-fails the program and queues its terminal notice. A function can still return
-that reply for its caller to inspect; `Answered(_)` and ordinary final values
-complete normally.
+- `status`, `result`, `error`: waiting, completed, or failed with a reply or
+  with a program error's text;
+- `log`: every new step in the order the program reached it (a request
+  opened, handed over or closed by the program; something said; a wait begun
+  or ended; a failed `forEach` handler), with `opened`, `said` and `cancelled`
+  as views of it;
+- `unreached`: open requests the program no longer reaches after an edit, and
+  `rescheduled`: deadlines its text moved;
+- `waiting`: what the wait it stopped at is for, with `or` flattened;
+- `nextDue`: the earliest time at which another pass could make progress by
+  the clock alone.
 
-Every request verb (`ask`, `confirm`, `choose`, `run`, `judge`) returns a
-handle. `r->wait` waits for its `reply`; `r->waitUntil(t)` returns
-`Some(reply)` or `None`. The request's optional `~by` deadline closes it
-`NoReply` independently of any wait. A wait timing out leaves it open;
-`status(r)` remains `None` until the request actually ends. Handover retains
-its original deadline and identity. Program termination cancels every request
-it leaves open, including unchecked dropped handles.
+A pass reads the ledger when it starts and writes it only when it finishes. A
+pass that throws (a policy that cannot answer, for instance) leaves the ledger
+exactly as it was, so a crash, a restart or a second worker is only another
+pass. `evaluate(…, {commit: false})` never writes: it is the preview of spec
+§11.2. `slices` is the same pass as a generator that yields between slices of
+computation, for a host that must stay responsive.
 
-An event wait returns its actual value, without `Answered`. `waitUntil` wraps
-it in `Some`, or returns `None`. `or(a, b)` preserves the winning value in
-`First` or `Second`, nesting those constructors through composition and
-restart. `never()` persists an empty target set, without becoming runnable on
-repeated scans; `never()->waitUntil(t)` can still return `None`.
+**The end is recorded.** When a program completes or fails, the same commit
+stores its result in `ledger.ended` and ends every request it left open
+`Cancelled`. A later pass returns the recorded end and evaluates nothing.
 
-The simulated host rejects invalid answers, retains them as evidence and
-leaves the request open. `confirm` accepts `Yes`/`No`, `choose` an allowed
-constructor, `ask` text, `judge` a boolean, and `run` the reference host's
-report record `{text: string}`. An explicit `Refused` is distinct from an
-invalid answer. Request authority is rechecked on resumption; losing event
-observation authority ends the program `Revoked`. Policy or storage outages
-still propagate without committing a program error.
+**Program errors.** Division by zero, an unbound name, an unknown label, a
+malformed `choose`, a non-positive timer, `fail(Answered(x))` and stream
+`map`/`filter` (not implemented) end the program as a program failure with
+the error's text. They never become `Broke`. Any other exception is the
+runtime's own and propagates.
 
-Schema 8 and machine ABI `norn-cek:4` are required. Loading schema 7, restoring
-an ABI 3 checkpoint or resuming an ABI 3 snapshot reports both versions and
-refuses to reinterpret old semantics. A pinned AST does not bypass that fence.
+**The step budget.** A pass that computes for more than its budget (five
+million machine steps by default) without reaching a wait or finishing ends
+as a program failure: "The program computed for too long without waiting or
+finishing". Only whole slices of computation count, so replaying a long
+history of recorded effects does not use the budget up. There is no other
+cap.
 
-`after` accepts a positive duration or an absolute time. An absolute time already
-reached when the wait is registered is ready immediately; `every` continues to
-require a positive duration. `show(x)` is a pure built-in, also usable as
-`x->show`, with the same readable time, duration, participant and variant text
-used by string interpolation.
+## Requests, facts and streams
 
-The runtime remains separate from xMatrix's production mechanisms. No schedule,
-approval, request or PR subscription has been migrated by this prototype.
+- `settle(ledger, id, holder, reply, now)` records a participant's reply. A
+  late answer, an answer from someone who is not the holder and an answer
+  outside the request's form settle nothing and are appended to
+  `ledger.evidence`. `confirm` takes `Yes`/`No`, `choose` one of its options,
+  `ask` text, `judge` a boolean, and `run` a report record `{text: string}`.
+  `NoReply` cannot be given: only the clock decides it.
+- `settleDue(ledger, now)` ends every open request whose `~by` has passed
+  `NoReply`, at its deadline. `settle` and `evaluate` call it first, so the
+  reply is a function of the recorded history and the clock, never of when a
+  worker looked. A `~by` already reached when the request is recorded ends it
+  at once.
+- `establish` records a fact, which then holds; `occur` records one stream
+  occurrence. Both refuse timers, `never()` and compositions. A wait on a fact
+  that already holds ends at once. A wait on a stream takes the first
+  occurrence recorded after the wait began.
+- `r->waitUntil(t)` leaves the request open when its own deadline comes
+  first; `status(r)` stays `None` until the request ends. `handOver` keeps the
+  request's identity and `~by` and raises its epoch. `or` keeps the winning
+  value in `First` or `Second` through nesting. `never()` never occurs, and
+  `never()->waitUntil(t)` still returns `None`.
+- `after` takes a positive duration or an absolute time; `every` a positive
+  duration. `forEach` is sequential and re-arms after each callback; it does
+  not claim a fixed cadence or coalescing.
+
+## Authority
+
+`options.authorize(effect)` is the author's current authority (spec §10). A
+pass asks it only for effects the ledger does not hold yet: opening a
+request, saying something, reading a status, cancelling, handing over, and a
+wait that has not ended. What is recorded has happened and is not asked
+about again.
+
+- Authority lost at a wait on a request ends that request `Revoked`; the wait
+  returns it like any other reply.
+- Authority lost anywhere else, including a wait on a fact, a stream or a
+  timer, ends the program as failed with `Revoked`, and the requests it left
+  open end `Cancelled`.
+
+Leaving `authorize` out means the host vouches for the whole pass. A real
+transport must still check permissions again when it delivers.
+
+## The simulated team
+
+`Team` holds one program, its ledger and a virtual clock. It never starts an
+agent or contacts a service.
+
+- `advanceTo(at)` moves the clock forward and ends requests whose deadline it
+  reaches; `reply(id, holder, reply)` answers as a participant;
+  `emit(source, value)` makes a fact hold or a stream occur; `run()` is one
+  pass, and `slices()` the same pass in slices.
+- `permitted` is the author's authority, read by every pass.
+- `events` is what happened, in order: requests offered, handed over and
+  closed, things said, waits begun and ended, handler failures, the end.
+- `notices` is what the author is told: each failed `forEach` handler, once,
+  and the program ending without success (a reply other than `Answered`, or a
+  program error).
+
+Nothing is dispatched: an entry in `events` means the simulation shows it,
+never that a recipient received it. A production host needs delivery with
+reconciliation (spec §11, point 3), an alarm for `nextDue`, and a way to
+serialise passes over one ledger.
+
+**Restart.** The `Ledger` is plain JSON. Persisting it is
+`JSON.stringify(team.ledger)`; taking the program up again in another process
+is `new Team(code, {now, ledger: JSON.parse(text)})`. Nothing else crosses a
+restart, and the same holds for a newer version of the program or the
+runtime: it is evaluated against the same ledger, and its difference is what
+`{commit: false}` shows.
+
+## Browser entry and Std
+
+`src/runtime/browser.ts` exports `compile`, the ledger functions, `Team` and
+the value constructors. Its dependency graph has no Node module or global;
+CI type-checks it without Node types (`tsconfig.browser.json`), and
+`test/runtime/browser-import.test.ts` loads it in an isolated context that
+refuses every non-relative import.
+
+`compile(program, {std})` links `open Std` to the supplied library AST: the
+library's bindings initialise once in a private lexical scope, each `open`
+brings its exports into scope, and later bindings of the caller can shadow
+them without changing the library's own. A program compiled with another
+library text is another program. The runtime never reads a file or fetches a
+dependency by itself; a program with an unlinked `open Std` is refused.
 
 ## Try a simulated request
 
@@ -127,61 +178,32 @@ From the repository root, with Node 24 and `npm ci` already run:
 node --input-type=module <<'JS'
 import { parse } from './src/frontend/parser.ts';
 import { compile } from './src/runtime/code.ts';
-import { VirtualClock } from './src/runtime/clock.ts';
-import { SqliteStore } from './src/runtime/sqlite-store.ts';
-import { Runtime } from './src/runtime/runtime.ts';
-import { SimulatedHost } from './src/runtime/simulated-host.ts';
-import { text, variant } from './src/runtime/value.ts';
+import { Team } from './src/runtime/team.ts';
+import { show, text } from './src/runtime/value.ts';
 
 const parsed = parse('ask(@alice, "Ship?", ~by=1h)->wait');
 if (!parsed.ok) throw new Error(JSON.stringify(parsed.diagnostics));
-const clock = new VirtualClock();
-const store = new SqliteStore(':memory:', clock);
-try {
-  const host = new SimulatedHost(store, clock);
-  const runtime = new Runtime(compile(parsed.program), store, host);
-  await runtime.create('demo');
-  await host.pump(runtime);
-  const offer = (await store.effects('demo')).find(e => e.operation === 'request.offer');
-  const request = await store.request(offer.arguments.requestId);
-  await host.reply(request, variant('Answered', text('yes')));
-  await host.pump(runtime);
-  console.log((await store.load('demo')).status); // completed
-} finally {
-  await store.close();
-}
+const team = new Team(compile(parsed.program));
+console.log(team.run().status); // waiting
+const [request] = team.open;
+team.reply(request.id, request.holder, { tag: 'Answered', value: text('yes') });
+const pass = team.run();
+console.log(pass.status, show(pass.result)); // completed Answered(yes)
+console.log(JSON.stringify(team.ledger, null, 2)); // all there is to persist
 JS
 ```
 
-To exercise expiry instead of a reply, replace the reply with `await
-host.advanceTo(3_600_000)`, then pump. The request ends `NoReply` and its holder receives a
-durable closure notice. The four source examples and restart/crash checks run with
-`npm test`.
+To see the deadline instead of a reply, replace the reply with
+`team.advanceTo(3_600_000)`. The request ends `NoReply`, the program fails
+with it, and `team.notices` holds what its author is told. The five source
+examples and the contract cases run with `npm test`.
 
-## The ledger runtime
+## Not implemented
 
-`evaluate(code, ledger, now)` runs one pass: it starts the same machine from
-the top, answers each effect from the ledger, and stops at the first wait
-whose result is not recorded yet. It returns the requests it opened, what was
-said, the open requests the program no longer reaches, the deadlines it moved
-and the next time at which a pass could make progress by the clock alone. The
-`Ledger` is plain JSON; no machine state is kept between passes.
-
-- `settle(ledger, id, holder, reply, now)` records a participant's reply. A
-  late answer, an answer from a former holder and an answer outside the
-  request's form settle nothing and are appended to `ledger.evidence`.
-- `establish` records a fact and `occur` a stream occurrence. A wait on a
-  stream takes the first occurrence recorded after the wait began.
-- `evaluate(code, ledger, now, {commit: false})` is the preview of spec
-  §11.2: it leaves the ledger untouched.
-- A request's identity is a digest of its verb, holder, arguments and labels
-  other than `~by`, with its ordinal among identical requests in evaluation
-  order.
-- A pass that computes for more than its step budget without reaching a wait
-  ends as a program failure.
-
-Not implemented on the ledger runtime yet: authority checks and `Revoked`,
-stream `map`/`filter`, declaring that an edited request continues an old one,
-settling the occurrences of a standing duty separately, and dispatch.
-`test/runtime/ledger.test.ts` covers the cases of spec §11.1 that do not
-depend on those.
+Stream `map`/`filter`, structured `scope`, concurrent or coalescing stream
+handlers, child programs, declaring that an edited request continues an old
+one, settling the occurrences of a standing duty separately, dispatch and
+delivery receipts, real agent transports, and a multi-writer protocol for the
+ledger. Unsupported operations fail visibly. The runtime is separate from
+xMatrix's production mechanisms: no schedule, approval, request or PR
+subscription has been migrated to it.

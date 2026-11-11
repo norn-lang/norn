@@ -2,7 +2,6 @@
  * The timeline in words: each entry of a simulation as a sentence, with a
  * tone the page shows as the colour of its knot on the thread. Pure.
  */
-import type { Value } from "../../src/runtime/browser.ts";
 import type { Entry, RequestInfo } from "./simulation.ts";
 import { code, literal, participant, quote, time, type Run } from "./words.ts";
 
@@ -80,8 +79,6 @@ export function tell(entry: Entry): Line {
             : line(["Failed with ", code(entry.outcome), ". The author is told."], "bad", null, true);
         case "revoked":
           return line(["Revoked: the author no longer has the authority to go on."], "bad", null, true);
-        case "cancelled":
-          return line(["Cancelled"], "quiet", null, true);
       }
   }
 }
@@ -92,7 +89,7 @@ function closed(request: RequestInfo, outcome: Extract<Entry, { kind: "closed" }
   const what = request.name === "run" ? "The task given to " : "The question to ";
   switch (outcome.tag) {
     case "Answered": {
-      const value = outcome.value as unknown as Value;
+      const value = outcome.value;
       const answer: Run = value.type === "string" ? quote(value.value) : code(literal(value));
       if (who !== null) return line(["The judge decided ", answer], "good");
       if (request.name === "run") return line([holder, " finished with ", answer], "good");

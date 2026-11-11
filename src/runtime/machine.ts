@@ -3,7 +3,6 @@ import type { Code } from "./code.ts";
 import { match } from "./pattern.ts";
 import { equal, number, show, text, unit, variant, type Value } from "./value.ts";
 
-export const machineVersion = "norn-cek:4";
 export interface Effect { name: string; args: Value[]; labels: Record<string, Value> }
 type Control =
   | { kind: "eval"; node: string; env: string }
@@ -29,8 +28,6 @@ type Frame =
   | { kind: "default"; lambda: string; remaining: string[]; env: string; pattern: string }
   | { kind: "forEach"; stream: Value; callback: Value; stage: "waiting" | "handling" | "reporting" };
 export interface Machine {
-  version: typeof machineVersion;
-  codeId: string;
   control: Control;
   frames: Frame[];
   environments: Record<string, { parent: string | null; bindings: Record<string, Value> }>;
@@ -43,7 +40,7 @@ const effectBuiltins = new Set(["ask", "confirm", "choose", "run", "wait", "wait
 const builtins = new Set([...factBuiltins, ...streamBuiltins, ...effectBuiltins, "now", "show", "ignore", "fail", "or", "never", "map", "filter", "forEach"]);
 
 export function start(code: Code, now = 0): Machine {
-  return { version: machineVersion, codeId: code.id, control: { kind: "eval", node: code.root, env: "e0" }, frames: [],
+  return { control: { kind: "eval", node: code.root, env: "e0" }, frames: [],
     environments: { e0: { parent: null, bindings: {} } }, nextEnvironment: 1, resumedAt: now };
 }
 export function resume(machine: Machine, value: Value, now: number): Machine {
@@ -376,7 +373,7 @@ function accept(code: Code, machine: Machine, value: Value): void {
     }
   }
 }
-/** Drop unreachable environments at each checkpoint; recursion does not retain abandoned stacks. */
+/** Drop unreachable environments after each slice; recursion does not retain abandoned stacks. */
 export function collectEnvironments(machine: Machine): void {
   const reachable = new Set<string>();
   function env(id: string): void {
@@ -399,8 +396,6 @@ export function collectEnvironments(machine: Machine): void {
 }
 /** A time slice yields a ready machine; it is never a total execution quota. */
 export function advance(code: Code, machine: Machine, steps = 1_000): Machine {
-  if (machine.version !== machineVersion) throw new Error(`Unsupported machine ABI ${machine.version}; this runtime requires ${machineVersion}`);
-  if (machine.codeId !== code.id) throw new Error("Pinned code identity mismatch");
   if (!Number.isSafeInteger(steps) || steps < 1) throw new Error("Time slice must have positive integer steps");
   try {
     for (let i = 0; i < steps; i++) {

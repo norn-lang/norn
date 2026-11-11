@@ -107,11 +107,11 @@ export function createRunPanel(elements: RunElements, host: Host): RunPanel {
 
   function nowPanel(state: SimulationState): HTMLElement[] {
     if (state.error !== null) return [el("p", { class: "now-sentence failure" }, `The runtime stopped: ${state.error}`)];
-    if (state.status === "completed" || state.status === "failed" || state.status === "revoked" || state.status === "cancelled") {
+    if (state.status === "completed" || state.status === "failed" || state.status === "revoked") {
       return [el("p", { class: "now-sentence quiet" }, "The program has ended. Restart it to play again.")];
     }
     if (state.computing || state.waiting === null) {
-      return [el("p", { class: "now-sentence" }, "Computing. A program that never waits runs until you restart it.")];
+      return [el("p", { class: "now-sentence" }, "Computing. A program that never waits fails once it has computed for too long.")];
     }
     const today = formatDate(state.now);
     const parts: HTMLElement[] = [

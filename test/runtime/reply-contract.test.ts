@@ -1,208 +1,204 @@
+// The runtime contract of spec §11.1, against the ledger runtime. Contract
+// cases 1 to 5 are marked where they are checked.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { parse } from "../../src/frontend/parser.ts";
-import { compile } from "../../src/runtime/code.ts";
-import { machineVersion, start } from "../../src/runtime/machine.ts";
-import { MemoryStore } from "../../src/runtime/memory-store.ts";
-import { SqliteStore } from "../../src/runtime/sqlite-store.ts";
-import { VirtualClock } from "../../src/runtime/clock.ts";
-import { Runtime } from "../../src/runtime/runtime.ts";
-import { SimulatedHost } from "../../src/runtime/simulated-host.ts";
-import { requestId, type DurableStore, type Json, type StoredRequest } from "../../src/runtime/persistence.ts";
+import { emptyLedger, evaluate, occur, settle } from "../../src/runtime/ledger.ts";
+import { Team } from "../../src/runtime/team.ts";
 import { text, variant, type Value } from "../../src/runtime/value.ts";
+import { HOUR, answered, fact, open, reply, report, restarted, source, started, stream } from "./helpers.ts";
 
-const hour = 3_600_000;
-function source(contents: string) {
-  const parsed = parse(contents); assert.ok(parsed.ok, JSON.stringify(parsed)); return compile(parsed.program);
-}
-async function question(store: DurableStore): Promise<StoredRequest> {
-  const offer = (await store.effects("p")).find(e => e.operation === "request.offer")!;
-  return (await store.request((offer.arguments as {requestId: string}).requestId))!;
-}
-async function control(store: DurableStore): Promise<unknown> { return ((await store.load("p"))!.snapshot as {control: unknown}).control; }
-const stores = { memory: (c: VirtualClock): DurableStore => new MemoryStore(c), sqlite: (c: VirtualClock): DurableStore => new SqliteStore(":memory:", c) };
+const tuple = (...values: Value[]): Value => ({ type: "tuple", values });
 
-for (const [name, open] of Object.entries(stores)) {
-  test(`${name}: request deadline without scans rejects a late reply and status sees NoReply`, async () => {
-    const clock = new VirtualClock(), store = open(clock), host = new SimulatedHost(store, clock);
-    const runtime = new Runtime(source('let q = ask(@alice, "Question", ~by=1h)\nlet r = q->wait\n(r, status(q))'), store, host);
-    try {
-      await runtime.create("p"); await host.pump(runtime); const q = await question(store);
-      clock.advanceTo(hour + 1); // No alarm, scan or worker runs at the boundary.
-      assert.equal(await host.reply(q, variant("Answered", text("late"))), false);
-      await host.pump(runtime);
-      assert.deepEqual(await control(store), {kind: "done", value: {type: "tuple", values: [variant("NoReply"), variant("Some", variant("NoReply"))]}});
-      const evidence = await store.requestEvidence(q.id);
-      assert.equal(evidence.length, 1); assert.equal(evidence[0].accepted, false);
-      assert.deepEqual((await store.request(q.id))!.outcome, {tag: "NoReply"});
-    } finally { await store.close(); }
-  });
+test("case 1: a request deadline passes with no scan; the late reply is evidence, and wait and status see NoReply", () => {
+  const code = source('let q = ask(@alice, "Question", ~by=1h)\nlet r = q->wait\n(r, status(q))'), ledger = emptyLedger();
+  evaluate(code, ledger, 0);
+  const q = open(ledger);
+  // No alarm, scan or pass runs at the boundary: the clock alone has decided.
+  assert.equal(settle(ledger, q.id, "@alice", answered(text("late")), HOUR + 1), false);
+  assert.deepEqual(ledger.evidence.map(e => [e.request, e.holder, e.reply, e.reason]), [[q.id, "@alice", answered(text("late")), "The request has already ended"]]);
+  assert.deepEqual([ledger.requests[q.id].reply, ledger.requests[q.id].settledAt], [{ tag: "NoReply" }, HOUR]);
+  const pass = evaluate(code, ledger, HOUR + 1);
+  assert.deepEqual(pass.result, tuple(variant("NoReply"), variant("Some", variant("NoReply"))));
+});
 
-  test(`${name}: waitUntil is independent; equal request and observation deadlines yield Some(NoReply)`, async () => {
-    for (const [by, expected] of [["1h", variant("Some", variant("NoReply"))], ["2h", variant("None")]] as const) {
-      const clock = new VirtualClock(), store = open(clock), host = new SimulatedHost(store, clock);
-      const runtime = new Runtime(source(`let q = ask(@alice, "Question", ~by=${by})\nlet observed = q->waitUntil(1h)\nlet state = status(q)\nafter(1h)->wait\n(observed, state)`), store, host);
-      try {
-        await runtime.create("p"); await host.pump(runtime); const q = await question(store);
-        clock.advanceTo(hour); await host.pump(runtime);
-        assert.deepEqual((await store.request(q.id))!.outcome, by === "1h" ? {tag: "NoReply"} : null);
-        clock.advanceTo(2 * hour); await host.pump(runtime);
-        assert.deepEqual(await control(store), {kind: "done", value: {type: "tuple", values: [expected, by === "1h" ? variant("Some", variant("NoReply")) : variant("None")]}});
-      } finally { await store.close(); }
-    }
-  });
+test("an answer recorded before the deadline wins; an answer exactly at it is too late", () => {
+  for (const at of [HOUR - 1, HOUR]) {
+    const code = source('ask(@alice, "Question", ~by=1h)->wait'), ledger = emptyLedger();
+    evaluate(code, ledger, 0);
+    assert.equal(settle(ledger, open(ledger).id, "@alice", answered(text("yes")), at), at === HOUR - 1);
+    const pass = evaluate(code, ledger, 5 * HOUR);
+    assert.deepEqual([pass.status, pass.result], at === HOUR - 1 ? ["completed", variant("Answered", text("yes"))] : ["failed", variant("NoReply")]);
+  }
+});
 
-  test(`${name}: handover preserves the deadline and fences old replies after restoration`, async () => {
-    const clock = new VirtualClock(), store = open(clock), host = new SimulatedHost(store, clock);
-    let runtime = new Runtime(source('let q = ask(@codex, "Question", ~by=2h)\nlet r = switch q->waitUntil(1h) { | Some(r) => r | None => q->handOver(@alice)->wait }\nr'), store, host);
-    try {
-      await runtime.create("p"); await host.pump(runtime); const first = await question(store);
-      clock.advanceTo(hour); await host.pump(runtime);
-      const moved = (await store.request(first.id))!;
-      assert.equal(moved.holder, "@alice"); assert.equal(moved.epoch, 1); assert.equal(moved.by, 2 * hour);
-      runtime = await Runtime.restore("p", store, host);
-      assert.equal(await host.reply(first, variant("Answered", text("obsolete"))), false);
-      assert.equal((await store.request(first.id))!.outcome, null);
-      assert.ok(await host.reply(moved, variant("Answered", text("current")))); await host.pump(runtime);
-      assert.deepEqual(await control(store), {kind: "done", value: variant("Answered", text("current"))});
-    } finally { await store.close(); }
-  });
+test("case 3: waitUntil is independent; equal request and wait deadlines yield Some(NoReply)", () => {
+  for (const [by, expected] of [["1h", variant("Some", variant("NoReply"))], ["2h", variant("None")]] as const) {
+    const { team } = started(`let q = ask(@alice, "Question", ~by=${by})\nlet observed = q->waitUntil(1h)\nlet state = status(q)\nafter(1h)->wait\n(observed, state)`);
+    const q = open(team);
+    team.advanceTo(HOUR); team.run();
+    assert.deepEqual(team.ledger.requests[q.id].reply, by === "1h" ? { tag: "NoReply" } : null);
+    team.advanceTo(2 * HOUR);
+    assert.deepEqual(team.run().result, tuple(expected, by === "1h" ? variant("Some", variant("NoReply")) : variant("None")));
+  }
+});
 
-  test(`${name}: an unchecked dropped request stays open while running, then is cancelled atomically`, async () => {
-    const clock = new VirtualClock(), store = open(clock), host = new SimulatedHost(store, clock);
-    const runtime = new Runtime(source('ask(@alice, "Unobserved")\nafter(1h)->wait'), store, host);
-    try {
-      await runtime.create("p"); await host.pump(runtime); const q = await question(store);
-      assert.equal(q.outcome, null);
-      clock.advanceTo(hour); await runtime.runReady();
-      assert.equal((await store.load("p"))!.status, "completed");
-      assert.deepEqual((await store.request(q.id))!.outcome, {tag: "Cancelled"});
-      const closure = (await store.effects("p")).filter(e => e.operation === "request.closed");
-      assert.equal(closure.length, 1); assert.equal(closure[0].status, "pending");
-      assert.deepEqual((closure[0].arguments as {outcome: unknown}).outcome, {tag: "Cancelled"});
-    } finally { await store.close(); }
-  });
+test("case 2: handover preserves the deadline and fences the old holder's reply, across a restart", () => {
+  let { team } = started('let q = ask(@codex, "Question", ~by=2h)\nlet r = switch q->waitUntil(1h) { | Some(r) => r | None => q->handOver(@alice)->wait }\nr');
+  const first = open(team);
+  team.advanceTo(HOUR); team.run();
+  const moved = open(team);
+  assert.deepEqual([moved.id, moved.holder, moved.epoch, moved.by], [first.id, "@alice", 1, 2 * HOUR]);
+  team = restarted(team);
+  assert.equal(reply(team, first, answered(text("obsolete"))), false);
+  assert.equal(team.ledger.requests[first.id].reply, null);
+  assert.deepEqual(team.ledger.evidence.map(e => [e.holder, e.reason]), [["@codex", "Not the request's holder"]]);
+  assert.ok(reply(team, moved, answered(text("current"))));
+  assert.deepEqual(team.run().result, variant("Answered", text("current")));
+});
 
-  test(`${name}: invalid answers are evidence, never refusal or consent`, async () => {
-    const cases: [string, Value, Value][] = [
-      ['confirm(@alice, "Proceed?")', text("maybe"), variant("Yes")],
-      ['choose(@alice, "Choose", [Ship, Drop])', variant("Other"), variant("Drop")],
-      ['ask(@alice, "Text?")', variant("Yes"), text("yes")],
-      ['judge("Ready?")', text("yes"), {type: "bool", value: true}],
-      ['run(@alice, "Work")', text("unstructured"), {type: "record", fields: {text: text("report")}}],
-    ];
-    for (const [expression, invalid, valid] of cases) {
-      const clock = new VirtualClock(), store = open(clock), host = new SimulatedHost(store, clock);
-      const runtime = new Runtime(source(`${expression}->wait`), store, host);
-      try {
-        await runtime.create("p"); await host.pump(runtime); const q = await question(store);
-        assert.equal(await host.reply(q, variant("Answered", invalid)), false);
-        assert.equal((await store.request(q.id))!.outcome, null);
-        assert.equal((await store.requestEvidence(q.id))[0].accepted, false);
-        assert.ok((await store.requestEvidence(q.id))[0].invalidReason);
-        assert.ok(await host.reply(q, variant("Answered", valid))); await host.pump(runtime);
-        assert.deepEqual(await control(store), {kind: "done", value: variant("Answered", valid)});
-      } finally { await store.close(); }
-    }
-  });
+test("case 4: an unchecked dropped request stays open while the program runs, then is cancelled with its result", () => {
+  const { team } = started('ask(@alice, "Unobserved")\nafter(1h)->wait');
+  const q = open(team);
+  team.advanceTo(HOUR);
+  const pass = team.run();
+  assert.equal(pass.status, "completed");
+  assert.deepEqual(pass.cancelled, [q.id]);
+  // One commit holds the result and the cancellation, and the holder is told once.
+  assert.deepEqual([team.ledger.requests[q.id].reply, team.ledger.ended?.at], [{ tag: "Cancelled" }, HOUR]);
+  const closures = team.events.filter(event => event.kind === "closed");
+  assert.deepEqual(closures.map(event => [event.request.holder, event.reply]), [["@alice", { tag: "Cancelled" }]]);
+  team.run();
+  assert.equal(team.events.filter(event => event.kind === "closed").length, 1);
+});
 
-  test(`${name}: expiry without a waiter fences dispatch, reads and handover`, async () => {
-    for (const operation of ["claim", "read", "handover", "scan"] as const) {
-      const clock = new VirtualClock(), store = open(clock);
-      try {
-        await store.create({executionId: "p", codeId: "c", machineVersion, status: "ready", snapshot: null});
-        const c = (await store.commit((await store.load("p"))!, {status: "ready", snapshot: null, requests: [{holder: "alice", arguments: "q", by: {after: hour}}]}))!;
-        clock.advanceTo(hour);
-        if (operation === "claim") assert.equal(await store.claimEffect(c.effects[0].id, "worker", 10), null);
-        if (operation === "read") assert.deepEqual((await store.request(c.requests[0].id))!.outcome, {tag: "NoReply"});
-        if (operation === "handover") assert.equal(await store.handOver(c.requests[0].id, 0, "alice", "bob"), null);
-        if (operation === "scan") assert.equal((await store.scanEffects()).some(e => e.operation === "request.offer"), false);
-        assert.deepEqual((await store.request(c.requests[0].id))!.outcome, {tag: "NoReply"});
-      } finally { await store.close(); }
-    }
-  });
+test("invalid answers are evidence, never refusal or consent", () => {
+  const cases: [string, Value, Value][] = [
+    ['confirm(@alice, "Proceed?")', text("maybe"), variant("Yes")],
+    ['choose(@alice, "Choose", [Ship, Drop])', variant("Other"), variant("Drop")],
+    ['ask(@alice, "Text?")', variant("Yes"), text("yes")],
+    ['judge("Ready?")', text("yes"), { type: "bool", value: true }],
+    ['run(@alice, "Work")', text("unstructured"), report("report")],
+  ];
+  for (const [expression, invalid, valid] of cases) {
+    const { team } = started(`${expression}->wait`), q = open(team);
+    assert.equal(reply(team, q, answered(invalid)), false);
+    assert.equal(team.ledger.requests[q.id].reply, null);
+    assert.deepEqual(team.ledger.evidence.map(e => e.reply), [answered(invalid)]);
+    assert.ok(team.ledger.evidence[0].reason);
+    assert.equal(team.run().status, "waiting");
+    assert.ok(reply(team, q, answered(valid)));
+    assert.deepEqual(team.run().result, variant("Answered", valid));
+  }
+});
 
-  test(`${name}: program errors remain errors; every open request ends Cancelled`, async () => {
-    for (const [expression, message] of [['1 / 0', 'Division by zero'], ['missing', 'Unbound name missing'], ['fail(Answered(1))', 'fail requires a reply other than Answered'], ['ask(@alice, "q", ~until=1h)', 'Unknown ask label until']] as const) {
-      const clock = new VirtualClock(), store = open(clock), host = new SimulatedHost(store, clock);
-      const runtime = new Runtime(source(`let q = ask(@alice, "Outstanding")\n${expression}`), store, host);
-      try {
-        await runtime.create("p"); await host.pump(runtime);
-        assert.deepEqual(await control(store), {kind: "error", message});
-        assert.equal((await store.load("p"))!.status, "failed");
-        const q = await question(store); assert.deepEqual(q.outcome, {tag: "Cancelled"});
-        const error = (await store.effects("p")).find(e => e.operation === "execution.failed")!;
-        assert.deepEqual(error.arguments, {kind: "program-error", message});
-      } finally { await store.close(); }
-    }
-  });
+test("a request nobody waits on still ends at its deadline, and a later handover does nothing", () => {
+  const code = source('let q = ask(@alice, "Question", ~by=1h)\nafter(2h)->wait\nlet moved = q->handOver(@bob)\n(status(q), moved->wait)'), ledger = emptyLedger();
+  evaluate(code, ledger, 0);
+  const q = open(ledger);
+  const pass = evaluate(code, ledger, 2 * HOUR);
+  assert.deepEqual(pass.result, tuple(variant("Some", variant("NoReply")), variant("NoReply")));
+  assert.deepEqual(pass.log.filter(step => step.kind === "handedOver"), []);
+  const ended = ledger.requests[q.id];
+  assert.deepEqual([ended.holder, ended.epoch, ended.settledAt], ["@alice", 0, HOUR]);
+});
 
-  test(`${name}: events return their actual value and lost observation authority revokes the program`, async () => {
-    const clock = new VirtualClock(), store = open(clock), host = new SimulatedHost(store, clock);
-    const runtime = new Runtime(source('let q = ask(@alice, "Still open")\nmerged("pr")->wait'), store, host);
-    try {
-      await runtime.create("p"); await host.pump(runtime); const q = await question(store);
-      host.permitted = false;
-      await host.emit("merged", {type: "source", kind: "fact", name: "merged", args: [text("pr")], labels: {}}, text("pr"));
-      await host.pump(runtime);
-      assert.equal((await store.load("p"))!.status, "revoked");
-      assert.deepEqual((await store.request(q.id))!.outcome, {tag: "Cancelled"});
-      assert.deepEqual(await control(store), {kind: "failed", outcome: variant("Revoked")});
-    } finally { await store.close(); }
-  });
+test("a request's deadline survives a disk restart without an active waiter", () => {
+  const { team: before } = started('let q = ask(@alice, "Question", ~by=1h)\nafter(1d)->wait\nstatus(q)');
+  const q = open(before);
+  const after = restarted(before, HOUR + 1);
+  assert.equal(reply(after, q, answered(text("late"))), false);
+  const stored = after.ledger.requests[q.id];
+  assert.deepEqual([stored.by, stored.settledAt, stored.reply], [HOUR, HOUR, { tag: "NoReply" }]);
+  assert.deepEqual(after.events.map(event => [event.kind, event.at]), [["closed", HOUR]]);
+});
 
-  test(`${name}: waitUntil preserves a reply-valued event without treating it as a request reply`, async () => {
-    const clock = new VirtualClock(), store = open(clock), host = new SimulatedHost(store, clock);
-    const runtime = new Runtime(source('let observed = runEnded("run")->waitUntil(1h)\n(observed, "continued")'), store, host);
-    try {
-      await runtime.create("p"); await host.pump(runtime);
-      const payload = variant("Refused", text("not a request from this program"));
-      await host.emit("ended", {type: "source", kind: "fact", name: "runEnded", args: [text("run")], labels: {}}, payload);
-      await host.pump(runtime);
-      assert.deepEqual(await control(store), {kind: "done", value: {type: "tuple", values: [variant("Some", payload), text("continued")]}});
-      assert.equal((await store.effects("p")).length, 0);
-    } finally { await store.close(); }
-  });
+test("program errors remain errors; every open request ends Cancelled, and the author is told", () => {
+  const cases = [
+    ["1 / 0", "Division by zero"], ["missing", "Unbound name missing"], ["fail(Answered(1))", "fail requires a reply other than Answered"],
+    ['ask(@alice, "q", ~until=1h)', "Unknown ask label until"], ['say(@alice, 1)', "say needs a participant or a reference, and text"],
+    ['after(0h)->wait', "A relative timer needs a positive duration"], ["status(1)", "status needs a request of this program"],
+    ['ciFailed("acme/api")->map(x => x)->wait', "Stream map/filter are not implemented by the reference host yet"],
+    ['ciFailed("acme/api")->filter(x => true)->forEach(x => ())', "Stream map/filter are not implemented by the reference host yet"],
+  ] as const;
+  for (const [expression, message] of cases) {
+    const { team, pass } = started(`let q = ask(@alice, "Outstanding")\n${expression}`);
+    assert.deepEqual([pass.status, pass.result, pass.error], ["failed", null, message]);
+    assert.deepEqual(Object.values(team.ledger.requests).map(request => request.reply), [{ tag: "Cancelled" }]);
+    assert.deepEqual(team.notices, [{ at: 0, about: "program", reply: null, error: message }]);
+  }
+});
 
-  test(`${name}: request authority lost before or after wait registration gives the same Revoked reply`, async () => {
-    for (const registered of [false, true]) {
-      const clock = new VirtualClock(), store = open(clock);
-      let permitted = true;
-      const policy = {async authorize() { return permitted; }};
-      const runtime = new Runtime(source('let q = ask(@alice, "Question")\nswitch q->wait { | Revoked => "handled" | _ => "other" }'), store, policy);
-      try {
-        await runtime.create("p"); await runtime.step("p");
-        if (registered) await runtime.step("p");
-        permitted = false;
-        await runtime.step("p"); await runtime.runReady();
-        assert.deepEqual((await question(store)).outcome, {tag: "Revoked"});
-        assert.deepEqual(await control(store), {kind: "done", value: text("handled")});
-      } finally { await store.close(); }
-    }
-  });
+test("events return their actual value, and lost observation authority ends the program Revoked", () => {
+  const { team } = started('let q = ask(@alice, "Still open")\nmerged("pr")->wait');
+  const q = open(team);
+  team.permitted = false;
+  team.emit(fact("merged", [text("pr")]), text("pr"));
+  const pass = team.run();
+  assert.deepEqual([pass.status, pass.result], ["failed", variant("Revoked")]);
+  assert.deepEqual(team.ledger.requests[q.id].reply, { tag: "Cancelled" });
+  assert.deepEqual(team.notices, [{ at: 0, about: "program", reply: variant("Revoked"), error: null }]);
 
-  test(`${name}: an older machine ABI is rejected with both versions and its snapshot unchanged`, async () => {
-    const clock = new VirtualClock(), store = open(clock), host = new SimulatedHost(store, clock), code = source('1');
-    try {
-      await store.saveCode(code.id, code.ast);
-      await store.create({executionId: "p", codeId: code.id, machineVersion: "norn-cek:3", status: "ready", snapshot: {...start(code), version: "norn-cek:3"} as unknown as Json});
-      const before = await store.load("p");
-      await assert.rejects(Runtime.restore("p", store, host), /norn-cek:3.*norn-cek:4/);
-      await assert.rejects(new Runtime(code, store, host).step("p"), /norn-cek:3.*norn-cek:4/);
-      assert.deepEqual(await store.load("p"), before);
-    } finally { await store.close(); }
-  });
+  const permitted = started('merged("pr")->wait').team;
+  permitted.emit(fact("merged", [text("pr")]), text("the pull request"));
+  assert.deepEqual(permitted.run().result, text("the pull request")); // No Answered around it.
+});
 
-  test(`${name}: relative request deadlines use commit time and cannot be declared by a participant`, async () => {
-    const clock = new VirtualClock(), store = open(clock);
-    try {
-      await store.create({executionId: "p", codeId: "c", machineVersion, status: "ready", snapshot: null});
-      const before = (await store.load("p"))!;
-      clock.advanceTo(123);
-      await store.commit(before, {status: "ready", snapshot: null, requests: [{holder: "alice", arguments: "q", by: {after: hour}}]});
-      const q = (await store.request(requestId("p", 1)))!; assert.equal(q.by, hour + 123);
-      await assert.rejects(store.settleRequest(q.id, 0, "alice", {tag: "NoReply"}), /store clock/);
-      assert.equal((await store.request(q.id))!.outcome, null);
-    } finally { await store.close(); }
-  });
-}
+test("waitUntil preserves a reply-valued event without treating it as a request reply", () => {
+  const { team } = started('let observed = runEnded("run")->waitUntil(1h)\n(observed, "continued")');
+  const payload = variant("Refused", text("not a request from this program"));
+  team.emit(fact("runEnded", [text("run")]), payload);
+  const pass = team.run();
+  assert.deepEqual([pass.status, pass.result], ["completed", tuple(variant("Some", payload), text("continued"))]);
+  assert.deepEqual([team.ledger.requests, team.notices], [{}, []]);
+});
+
+test("request authority lost before or after the wait began gives the same Revoked reply", () => {
+  for (const begun of [false, true]) {
+    const code = source('let q = ask(@alice, "Question")\nswitch q->wait { | Revoked => "handled" | _ => "other" }'), ledger = emptyLedger();
+    // Before: authority is already gone when the program first reaches the wait. After: it goes while the wait is open.
+    const first = evaluate(code, ledger, 0, { authorize: effect => begun || effect.name === "ask" });
+    const pass = begun ? evaluate(code, ledger, 1, { authorize: () => false }) : first;
+    assert.equal(first.opened.length, 1);
+    assert.deepEqual(Object.values(ledger.requests).map(request => request.reply), [{ tag: "Revoked" }]);
+    assert.deepEqual([pass.status, pass.result], ["completed", text("handled")]);
+    assert.deepEqual(pass.log.filter(step => step.kind === "closed").map(step => step.reply), [{ tag: "Revoked" }]); // The holder is told.
+  }
+});
+
+test("relative request deadlines count from when the request is recorded, and no participant can declare NoReply", () => {
+  const ledger = emptyLedger();
+  evaluate(source('ask(@alice, "Question", ~by=1h)->wait'), ledger, 123);
+  const q = open(ledger);
+  assert.equal(q.by, HOUR + 123);
+  assert.equal(settle(ledger, q.id, "@alice", { tag: "NoReply" }, 124), false);
+  assert.match(ledger.evidence[0].reason, /only by the ledger's clock/);
+  assert.equal(ledger.requests[q.id].reply, null);
+});
+
+test("a deadline already reached when the request is recorded has passed", () => {
+  const { team, pass } = started('ask(@alice, "Too late", ~by=2026-11-07T12:00Z)->wait', Date.parse("2026-11-07T12:00Z"));
+  assert.deepEqual([pass.status, pass.result], ["failed", variant("NoReply")]);
+  assert.deepEqual(team.events.map(event => event.kind), ["offered", "closed", "waiting", "waited", "ended"]);
+});
+
+test("facts can predate the wait; a stream never replays an occurrence from before it", () => {
+  const ci = stream("ciFailed", text("acme/api"));
+  const team = new Team(source('(merged("acme/api#1")->wait, ciFailed("acme/api")->wait)'));
+  team.emit(fact("merged", [text("acme/api#1")]), text("known"));
+  team.emit(ci, text("old occurrence"));
+  assert.equal(team.run().status, "waiting");
+  team.advanceTo(2);
+  team.emit(ci, text("new"));
+  assert.deepEqual(team.run().result, tuple(text("known"), text("new")));
+});
+
+test("external event timestamps are data, not a clock for unrelated deadlines", () => {
+  const code = source('ask(@alice, "Question", ~by=1h)->wait'), ledger = emptyLedger();
+  evaluate(code, ledger, 0);
+  const q = open(ledger);
+  occur(ledger, stream("docChanged", text("other")), { type: "record", fields: { occurredAt: { type: "time", value: "2592000000" } } }, 1);
+  assert.equal(evaluate(code, ledger, 1).status, "waiting");
+  assert.equal(ledger.requests[q.id].reply, null);
+  assert.equal(settle(ledger, q.id, "@alice", answered(text("late with no caller time")), HOUR + 1), false);
+  assert.deepEqual(evaluate(code, ledger, HOUR + 1).result, variant("NoReply"));
+});
