@@ -1,12 +1,12 @@
-// Prototype: the ledger is the only durable state. A program keeps no snapshot;
-// every pass evaluates it from the top against the ledger and reports which
-// requests should exist now. Nothing here dispatches or stores a machine.
+// The ledger is the only durable state (spec §9, §11). A program keeps no
+// snapshot: every pass evaluates it from the top against the ledger and
+// reports which requests should exist now. Nothing here dispatches anything.
 import type { Code } from "./code.ts";
 import { advance, resume, start } from "./machine.ts";
 import { projectOccurrence, type Json, type SourcePath } from "./persistence.ts";
 import { eventKey } from "./runtime.ts";
 import { sha256 } from "./sha256.ts";
-import { show, text, unit, variant, type Value } from "./value.ts";
+import { equal, show, text, unit, variant, type Value } from "./value.ts";
 
 export type Reply =
   | { tag: "Answered"; value: Value }
@@ -19,6 +19,8 @@ export interface LedgerRequest {
   holder: string;
   epoch: number;
   text: string;
+  /** What `choose` offers; null for every other verb. */
+  options: Value[] | null;
   by: number | null;
   openedAt: number;
   reply: Reply | null;
@@ -32,9 +34,14 @@ export interface Ledger {
   startedAt: number;
   requests: Record<string, LedgerRequest>;
   entries: Record<string, Entry>;
+  /** Facts hold once and stay true. */
   facts: Record<string, { at: number; value: Value }>;
+  /** Stream occurrences in the order the ledger recorded them; a wait takes the first one after its own beginning. */
+  occurrences: { key: string; at: number; value: Value }[];
+  /** Answers that settled nothing: late, from a former holder, or outside the request's form. */
+  evidence: { request: string; holder: string; at: number; reply: Reply; reason: string }[];
 }
-export const emptyLedger = (startedAt = 0): Ledger => ({ startedAt, requests: {}, entries: {}, facts: {} });
+export const emptyLedger = (startedAt = 0): Ledger => ({ startedAt, requests: {}, entries: {}, facts: {}, occurrences: [], evidence: [] });
 
 export interface Pass {
   status: "waiting" | "completed" | "failed";
@@ -72,14 +79,39 @@ export function settleDue(ledger: Ledger, now: number): void {
     }
   }
 }
+/** The first valid answer from the current holder settles a request; anything else is kept as evidence. */
 export function settle(ledger: Ledger, id: string, holder: string, reply: Reply, now: number): boolean {
+  settleDue(ledger, now);
   const request = ledger.requests[id];
-  if (!request || request.reply !== null || request.holder !== holder) return false;
+  if (!request) return false;
+  const reason = request.reply !== null ? "The request has already ended" : request.holder !== holder ? "Not the request's holder" : formError(request, reply);
+  if (reason !== null) { ledger.evidence.push({ request: id, holder, at: now, reply, reason }); return false; }
   request.reply = reply; request.settledAt = now;
   return true;
 }
+function formError(request: LedgerRequest, reply: Reply): string | null {
+  if (reply.tag === "NoReply") return "NoReply is decided only by the ledger's clock";
+  if (reply.tag !== "Answered") return null;
+  const answer = reply.value;
+  switch (request.verb) {
+    case "ask": return answer.type === "string" ? null : "The answer must be text";
+    case "confirm": return answer.type === "variant" && ["Yes", "No"].includes(answer.name) && !answer.args.length ? null : "The answer must be Yes or No";
+    case "choose": return request.options!.some(option => equal(option, answer)) ? null : "The answer is not one of the options";
+    case "judge": return answer.type === "bool" ? null : "A judgement must be true or false";
+    default: return answer.type === "record" && answer.fields.text?.type === "string" ? null : "A report must be a record with text";
+  }
+}
+export function establish(ledger: Ledger, fact: Value, value: Value, now: number): void {
+  if (fact.type !== "source" || fact.kind !== "fact") throw new Error("establish needs a fact");
+  ledger.facts[eventKey(fact)] ??= { at: now, value };
+}
+export function occur(ledger: Ledger, stream: Value, value: Value, now: number): void {
+  if (stream.type !== "source" || stream.kind !== "stream") throw new Error("occur needs a stream");
+  ledger.occurrences.push({ key: eventKey(stream), at: now, value });
+}
 
-interface Candidate { at: number; value: Value; elapsed: boolean }
+/** At one instant a request's own deadline comes first, then the wait's, then any other reply or occurrence. */
+interface Candidate { at: number; value: Value; rank: 0 | 1 | 2 }
 
 /**
  * One pass. With `commit: false` the ledger is left untouched and the result is
@@ -128,6 +160,7 @@ export function evaluate(code: Code, source: Ledger, now: number, options: { com
       if (!request) {
         request = ledger.requests[id] = {
           id, verb: name, holder, epoch: 0, text: question.type === "string" ? question.value : show(question),
+          options: name === "choose" && args[2]?.type === "list" ? args[2].values : null,
           by: instant(labels.by, now), openedAt: now, reply: null, settledAt: null, detached: false,
         };
         pass.opened.push(request);
@@ -142,39 +175,42 @@ export function evaluate(code: Code, source: Ledger, now: number, options: { com
 
     if (name === "wait" || name === "waitUntil") {
       const key = identity("wait", { target: args[0], until: args[1] ?? null });
-      const began = entry(`${key}/began`, () => ({ at: now, value: null })).at;
+      const beginning = entry(`${key}/began`, () => ({ at: now, value: ledger.occurrences.length }));
+      const began = beginning.at, cursor = beginning.value as number;
       let ended = ledger.entries[key];
       if (!ended) {
         const candidates: Candidate[] = [];
         const pending: { source: Value; path: SourcePath }[] = [{ source: args[0], path: [] }];
         while (pending.length) {
           const { source: target, path } = pending.pop()!;
-          const occurred = (at: number, value: Value): void => {
-            if (at <= now) candidates.push({ at, value: projectOccurrence(value as unknown as Json, path) as unknown as Value, elapsed: false });
+          const occurred = (at: number, value: Value, rank: 0 | 2 = 2): void => {
+            if (at <= now) candidates.push({ at, value: projectOccurrence(value as unknown as Json, path) as unknown as Value, rank });
             else due(at);
           };
           if (target.type === "request") {
             const request = ledger.requests[target.id];
-            if (request?.reply) occurred(request.settledAt!, replyValue(request.reply));
+            if (request?.reply) occurred(request.settledAt!, replyValue(request.reply), request.reply.tag === "NoReply" ? 0 : 2);
             else if (request?.by != null) due(request.by);
           } else if (target.type !== "source") throw new Error("wait needs a request, a fact or a stream");
           else if (target.name === "or") pending.push({ source: target.args[1], path: [...path, "Second"] }, { source: target.args[0], path: [...path, "First"] });
           else if (target.name === "after" || target.name === "every") {
             const at = instant(target.args[0], began)!;
             occurred(at, { type: "time", value: String(at) });
-          } else if (target.name !== "never") {
+          } else if (target.kind === "fact") {
             const fact = ledger.facts[eventKey(target)];
-            // A fact may already hold. A stream occurrence counts only after the wait began.
-            if (fact && (target.kind === "fact" || fact.at > began)) occurred(Math.max(fact.at, began), fact.value);
+            if (fact) occurred(Math.max(fact.at, began), fact.value); // A fact may already hold.
+          } else if (target.name !== "never") {
+            const key = eventKey(target);
+            const next = ledger.occurrences.find((occurrence, index) => index >= cursor && occurrence.key === key);
+            if (next) occurred(next.at, next.value);
           }
         }
         const limit = name === "waitUntil" ? instant(args[1], began)! : null;
-        if (limit !== null) { if (limit <= now) candidates.push({ at: limit, value: unit, elapsed: true }); else due(limit); }
-        // The earliest wins; at the same instant the deadline wins.
-        candidates.sort((a, b) => a.at - b.at || Number(b.elapsed) - Number(a.elapsed));
+        if (limit !== null) { if (limit <= now) candidates.push({ at: limit, value: unit, rank: 1 }); else due(limit); }
+        candidates.sort((a, b) => a.at - b.at || a.rank - b.rank);
         const winner = candidates[0];
         if (!winner) break; // Nothing has happened yet: this is all "waiting" means.
-        const value = name === "waitUntil" ? (winner.elapsed ? variant("None") : variant("Some", winner.value)) : winner.value;
+        const value = name === "waitUntil" ? (winner.rank === 1 ? variant("None") : variant("Some", winner.value)) : winner.value;
         ended = ledger.entries[key] = { at: winner.at, value: value as unknown as Json };
       }
       resume(machine, ended.value as unknown as Value, Math.max(ended.at, began)); continue;

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { parse } from "../../src/frontend/parser.ts";
 import { compile } from "../../src/runtime/code.ts";
-import { emptyLedger, evaluate, settle, type Ledger, type Reply } from "../../src/runtime/ledger.ts";
+import { emptyLedger, establish, evaluate, occur, settle, type Ledger, type Reply } from "../../src/runtime/ledger.ts";
 import { text, variant, type Value } from "../../src/runtime/value.ts";
 
 const HOUR = 3_600_000;
@@ -160,7 +160,8 @@ say(doc"ops#machines", reply?)`);
   const id = open(ledger)[0].id;
   evaluate(code, ledger, HOUR);
   assert.deepEqual([ledger.requests[id].holder, ledger.requests[id].epoch], ["@alice", 1]);
-  assert.equal(settle(ledger, id, "@codex", answered(text("no")), HOUR + 1), false); // Evidence, not an answer.
+  assert.equal(settle(ledger, id, "@codex", answered(text("no")), HOUR + 1), false);
+  assert.deepEqual(ledger.evidence.map(e => e.reason), ["Not the request's holder"]); // Kept, and settles nothing.
   assert.ok(settle(ledger, id, "@alice", answered(text("cooled down")), HOUR + 2));
   const pass = evaluate(code, ledger, HOUR + 2);
   assert.deepEqual(pass.said, [{ to: `doc"ops#machines"`, text: "cooled down" }]);
@@ -179,6 +180,46 @@ test("a standing duty re-arms from the ledger and reports a failed round to its 
   assert.equal(pass.status, "waiting");
   assert.equal(pass.nextDue, 2 * DAY + 5);
   assert.equal(Object.keys(ledger.entries).filter(k => k.startsWith("report:")).length, 1);
+});
+
+test("two deadlines at one instant: the request's own comes first, and an answer at the wait's deadline loses", () => {
+  const both = emptyLedger(), same = program(`ask(@alice, "Ready?", ~by=1h)->waitUntil(1h)`);
+  evaluate(same, both, 0);
+  assert.equal(settle(both, open(both)[0].id, "@alice", answered(text("yes")), HOUR), false);
+  assert.deepEqual(evaluate(same, both, HOUR).result, variant("Some", variant("NoReply")));
+
+  const late = emptyLedger(), shorter = program(`let q = ask(@alice, "Ready?", ~by=2h)
+switch q->waitUntil(1h) { | None => cancel(q) | Some(_) => () }`);
+  evaluate(shorter, late, 0);
+  const id = open(late)[0].id;
+  assert.ok(settle(late, id, "@alice", answered(text("yes")), HOUR)); // Answered, but the wait had already run out.
+  const pass = evaluate(shorter, late, HOUR);
+  assert.equal(pass.status, "completed");
+  assert.equal(late.requests[id].reply?.tag, "Answered"); // cancel on an ended request does nothing.
+});
+
+test("an answer outside the request's form is refused and the request stays open", () => {
+  const ledger = emptyLedger();
+  evaluate(program(`type plan = Ship | Drop
+choose(@alice, "Which?", [Ship, Drop])->wait`), ledger, 0);
+  const id = open(ledger)[0].id;
+  assert.equal(settle(ledger, id, "@alice", answered(variant("Delay")), 1), false);
+  assert.equal(ledger.requests[id].reply, null);
+  assert.ok(settle(ledger, id, "@alice", answered(variant("Drop")), 2));
+});
+
+test("a fact may already hold; a stream gives the first occurrence after the wait began, with its source", () => {
+  const code = program(`let pr = merged("acme/api#1")->wait
+ciFailed("acme/api")->or(prActivity("acme/api#1"))->wait`);
+  const ledger = emptyLedger();
+  const sources = program(`(merged("acme/api#1"), ciFailed("acme/api"), prActivity("acme/api#1"))`);
+  const [merged, ci, activity] = (evaluate(sources, emptyLedger(), 0).result as Extract<Value, {type: "list" | "tuple"}>).values;
+  occur(ledger, ci, text("before the wait"), 1);
+  establish(ledger, merged, text("abc123"), 2);
+  assert.equal(evaluate(code, ledger, 3).status, "waiting");
+  occur(ledger, activity, text("review"), 4);
+  occur(ledger, ci, text("lint"), 5);
+  assert.deepEqual(evaluate(code, ledger, 6).result, variant("Second", text("review")));
 });
 
 test("a program that never waits fails in the open", () => {
