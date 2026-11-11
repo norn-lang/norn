@@ -1,5 +1,12 @@
 # Reference machine and simulated host
 
+> Since 2026-11-11 the durable state of Norn is a ledger of requests, and a
+> program is a pure computation over it (spec §9, §11.2). The ledger runtime
+> is `src/runtime/ledger.ts`; see [The ledger runtime](#the-ledger-runtime)
+> below. The stored-state driver described first (`Runtime`, `DurableStore`,
+> the SQLite and memory stores, `SimulatedHost`) still runs the playground and
+> most tests, and is removed once they run on the ledger runtime.
+
 For the session-local memory adapter and `open Std`, see the
 [browser runtime](browser-runtime.md). SQLite remains the Node persistence
 adapter; importing the browser entry does not load it.
@@ -150,3 +157,31 @@ To exercise expiry instead of a reply, replace the reply with `await
 host.advanceTo(3_600_000)`, then pump. The request ends `NoReply` and its holder receives a
 durable closure notice. The four source examples and restart/crash checks run with
 `npm test`.
+
+## The ledger runtime
+
+`evaluate(code, ledger, now)` runs one pass: it starts the same machine from
+the top, answers each effect from the ledger, and stops at the first wait
+whose result is not recorded yet. It returns the requests it opened, what was
+said, the open requests the program no longer reaches, the deadlines it moved
+and the next time at which a pass could make progress by the clock alone. The
+`Ledger` is plain JSON; no machine state is kept between passes.
+
+- `settle(ledger, id, holder, reply, now)` records a participant's reply. A
+  late answer, an answer from a former holder and an answer outside the
+  request's form settle nothing and are appended to `ledger.evidence`.
+- `establish` records a fact and `occur` a stream occurrence. A wait on a
+  stream takes the first occurrence recorded after the wait began.
+- `evaluate(code, ledger, now, {commit: false})` is the preview of spec
+  §11.2: it leaves the ledger untouched.
+- A request's identity is a digest of its verb, holder, arguments and labels
+  other than `~by`, with its ordinal among identical requests in evaluation
+  order.
+- A pass that computes for more than its step budget without reaching a wait
+  ends as a program failure.
+
+Not implemented on the ledger runtime yet: authority checks and `Revoked`,
+stream `map`/`filter`, declaring that an edited request continues an old one,
+settling the occurrences of a standing duty separately, and dispatch.
+`test/runtime/ledger.test.ts` covers the cases of spec §11.1 that do not
+depend on those.

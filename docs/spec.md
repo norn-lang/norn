@@ -1,8 +1,10 @@
 # Norn language spec (draft v0)
 
-> Status: design draft, 2026-11-06, revised 2026-11-07, open to change. The
-> request and reply model was redesigned for clarity: see
-> [Changes from the first draft](#15-changes-from-the-first-draft). A local reference
+> Status: design draft, 2026-11-06, revised 2026-11-07 and 2026-11-11, open to
+> change. The request and reply model was redesigned for clarity: see
+> [Changes from the first draft](#15-changes-from-the-first-draft). The
+> durable state became a ledger of requests instead of a stored program
+> state: see [The ledger](#16-the-ledger-2026-11-11). A local reference
 > implementation (a parser, a durable evaluator and a simulated host) runs
 > four of the §3 examples from source
 > ([reference runtime](reference-runtime.md)). No production host implements
@@ -15,8 +17,8 @@
 
 ## 1. What Norn is
 
-Norn solves coordination at the language level. It describes how a group of
-autonomous people and AI agents get something done together:
+Norn is a language for collaboration among many agents and many people. It
+describes how a group of autonomous participants get something done together:
 
 - who is responsible for what;
 - who asks whom;
@@ -30,6 +32,13 @@ Its participants are people, and complete AI agents of any kind. They are not
 model calls or tools. Every call to a participant is a *request* to someone
 who decides how to do the work. They may answer late, decline, fail, or lose
 the authority to act.
+
+A person is one kind of participant, not a required step. Drafting, reviewing,
+deciding, verifying and taking over failed work can all be done by agents. No
+word of the language is reserved for people, so a role held by a person today
+can be given to an agent by changing who the role names, and the program stays
+as it is. People appear where they choose to, and where only a person can act:
+providing a secret, spending money, taking an action that cannot be undone.
 
 That places Norn one level above agent frameworks such as LangGraph, whose
 nodes are model calls and functions inside one agent. It is also
@@ -80,8 +89,17 @@ becomes a short program, and the standard library is written in Norn itself.
   - algebraic data types and pattern matching;
   - events as streams composed with pipes;
   - a ReScript-flavoured surface close to languages models already write well.
-- **Event-driven.** Waiting suspends a program until its event arrives.
-  Nothing polls.
+- **Event-driven.** A program is evaluated again when something it depends on
+  happens. Nothing polls.
+- **The ledger is the truth.** What a team shares is a ledger of requests: who
+  asked whom for what, about which thing, by when, and who holds it now. A
+  program is a pure computation over that ledger (§9), so it can be read,
+  previewed and changed while it runs.
+- **One holder, always.** Everything somebody counts on has exactly one
+  holder at any moment, and a place to go when that holder fails.
+- **Towards automation.** When a step needs a person today, that is usually a
+  limit of capability or infrastructure, not a property of the step. The
+  language never makes a person necessary.
 - **The language is separate from any host.** A host supplies participants,
   events and storage (§11). xMatrix is the first host.
 
@@ -394,15 +412,31 @@ Common features of agent products reduce to these functions:
 - escalation → `followUp`;
 - "keep going until it's done" → the `push` loop in §3.
 
-## 9. Execution model in one paragraph
+## 9. Execution model
 
-A running program is a pure functional evaluation that pauses only at effects.
-At each effect the host durably records the program's state together with the
-effect's intent. It performs the effect under current authority, and later
-resumes the program with exactly one committed result. How the state is
-represented is the host's choice (§11): an explicit evaluator state, replay
-from an effect journal, or a hybrid. The language guarantees the same
-observable behaviour either way.
+The durable state of a team's work is a **ledger of requests**. A program
+stores nothing of its own: no stack, no snapshot, no position.
+
+- **A pass.** Whenever something a program depends on is recorded (a request
+  ends, a fact is established, a stream occurs, a deadline passes), the
+  program is evaluated from the top against the ledger. Where it makes a
+  request the ledger already holds, it gets that request back. Where it waits
+  on something that has happened, it gets the recorded result and goes on.
+  Where it waits on something that has not happened, the pass ends. The
+  requests the pass reached and the ledger lacks are opened.
+- **Every input is recorded.** When a wait began, how it ended, what a
+  `status` read saw and what was said are ledger entries. A later pass
+  therefore takes the same path, and a crash, a restart or a second worker is
+  only another pass.
+- **Identity.** A request is the same request when it asks the same holder
+  for the same thing: verb, participant, text and labels other than `~by`.
+  Identical requests are told apart by their order of evaluation.
+- **Waiting is not a primitive.** It is what an open request looks like from
+  the side of whoever asked.
+
+The ledger belongs to the host, not to the language: a request made in
+conversation, by a card or by a schedule is the same kind of entry as one a
+program makes. §11.2 gives the rules for changing a program while it runs.
 
 ## 10. Safety and authority
 
@@ -410,8 +444,8 @@ observable behaviour either way.
   §6. It cannot open sockets, read secrets, spend money or send mail. Those
   things happen inside agent runs that `run` starts, under the agent's own
   permissions and approval policies.
-- **Code is pinned; authority is not.** A waiting program keeps running the code
-  it started with. Every effect is admitted under the author's *current*
+- **Code can change; authority is current.** A program may be edited while it
+  runs (§11.2). Every effect is admitted under the author's *current*
   grants. Authority lost during a long wait shows up as `Revoked`: as the
   reply of a request whose authority was lost, or, while the program waits on
   a fact or a stream, as the program's own result. Suspended state stores
@@ -466,19 +500,18 @@ The language fixes a portable kernel. Hosts implement a contract.
 1. **Requests and waits have separate lifetimes.** A request is durable once its
    intent is recorded. Recording it does not mean the recipient accepted,
    started or finished.
-2. **One committed resumption, not one physical evaluation.** Pure code may be
-   re-evaluated after a crash. Only one state transition from a given
-   suspended revision commits. Retries reuse the same request and effect
-   identities, and a recipient deduplicates them.
+2. **Any number of evaluations, one ledger.** A program is re-evaluated from
+   the top on every pass. Two passes over the same ledger reach the same
+   requests under the same identities, so a repeated or concurrent pass opens
+   nothing twice, and a recipient deduplicates by that identity.
 3. **Unconfirmed actions are reconciled, not repeated.** After dispatch and before
    a receipt, the host reconciles the original identity. It does not invent
    success and does not blindly repeat.
 4. **Facts and occurrences are different.** See §6.2. Neither is a request,
    and waiting on one never produces a reply.
-5. **Code is pinned and authority is current.** See §10. A change to a program's
-   definition creates a new version. The host's activation contract says
-   whether running instances drain, are cancelled, or are explicitly
-   migrated. It never runs both versions by accident.
+5. **Code can change and authority is current.** See §10 and §11.2. An edit
+   takes effect only after its difference has been shown. It never cancels a
+   request by itself.
 
 ### 11.1 Requests, replies and deadlines: the runtime contract
 
@@ -579,6 +612,40 @@ suite that every host runs is still to be written.
 - ✓ pure loops that never wait;
 - ✓ handing over a request without duplicating its rights.
 
+### 11.2 Changing a program while it runs
+
+A plan changes while people and agents are working on it. Stopping the
+program and starting again would ask everyone the same things twice.
+
+- **The preview.** Evaluating the edited program against the ledger without
+  committing gives its difference: the requests it would open, the open
+  requests it no longer reaches, and the deadlines it moves. An edit is
+  applied only after that difference has been shown to whoever applies it.
+- **What stays.** A request the edited program still makes is the same
+  request. Its holder is not asked again, and an answer already given stands.
+- **A moved deadline amends.** `~by` is not part of a request's identity.
+- **Nothing in flight is cancelled by an edit.** An open request the edited
+  program does not reach is listed, and whoever applies the edit decides for
+  each one whether to cancel it or leave it open. One left open rejoins the
+  program if a later pass reaches it. This rule exists because turning two
+  parallel requests into a sequence would otherwise cancel the second and
+  issue it again later.
+- **A changed text is a new request.** Whoever applies the edit may declare
+  that it continues an existing one; the declaration is a ledger entry.
+- **An upgrade is an edit.** A new version of the language, the evaluator or
+  the standard library is applied the same way. A program whose difference is
+  not empty stops with a notice to its author, and does not go on silently.
+- **Requests that can be identical must be told apart.** If an edit puts a
+  request in front of an identical one, the new one takes the old answer. A
+  program that can make two identical requests must distinguish them by what
+  they are about or by a name. The checker does not enforce this yet.
+
+**What this costs.** A pass reads the whole history of its program, and the
+evaluator must give the same result across versions, or upgrades must be
+checked program by program. A standing duty settles each occurrence on its
+own, so finished occurrences need not be evaluated again; the reference
+implementation does not do that yet.
+
 ## 12. The formal model underneath (proposed)
 
 Two surveys informed this section. The model survey is
@@ -586,8 +653,14 @@ Two surveys informed this section. The model survey is
 [research/choreographies.md](research/choreographies.md). Their conclusions
 agree.
 
-**Core: one-shot algebraic effects, run as stored continuations inside virtual
-actors.**
+**Since 2026-11-11 the durable state is the ledger of §9, not a stored
+continuation.** The points below about effects, single-assignment requests,
+CALM and the adopted rules still describe the semantics. What changed is
+where the truth lives: a continuation is rebuilt by each pass, and nothing
+depends on storing one.
+
+**Core: one-shot algebraic effects over a ledger of single-assignment
+requests.**
 
 - **Effects.** Every suspension is an effect, and the host is the outermost
   handler. Continuations are delimited, not `call/cc`, and one-shot, as in
@@ -621,10 +694,8 @@ actors.**
   invariants may also require authoritative ordering. Each such decision is
   committed by the authority for its scope; an actor cannot settle another
   authority's policy merely by observing an event.
-- **Code identity.** Code is pinned per instance; edits start new instances;
-  migration is explicit, as with Erlang's `code_change`. The recovery
-  backend, explicit evaluator state or replay, is still chosen by the
-  experiment in §11.
+- **Code identity.** Code is not pinned. An edit is applied through its
+  difference against the ledger (§11.2).
 
 **Rules adopted from the surveys:**
 
@@ -688,9 +759,8 @@ from projection.
    - (a) Each scope has one authority, and authorities co-operate through
      authenticated messages. This is the current assumption.
    - (b) Waiting programs live on participants' own machines.
-4. **Recovery backend for the first host.** The choice is between an explicit
-   evaluator state with an effect journal, and replay on a managed workflow
-   service. It will be settled by a failure-injection prototype.
+4. **Identity under edits.** How the checker finds requests that can be
+   identical, and how a name for a long-lived request is written.
 5. **Concrete syntax details.**
    - Time literals.
    - `?` on nested replies.
@@ -729,3 +799,21 @@ old checkpoints are refused (§11.1, case 6).
 | dropped outcomes refused | dropped requests and replies refused | The runtime cancels a program's open requests when it ends, so a dropped handle is a silent cancellation. |
 | the holder could give an ETA that moved the deadline | the deadline is the program's; an ETA is a message | A deadline that the waited-on party can move has no single meaning. |
 | host fact `replied(ref, ~by=participant)` | `replied(ref, ~from=participant)` | `~by` now always means a request's deadline. |
+
+## 16. The ledger (2026-11-11)
+
+Daniel set the goal as a language for collaboration among many agents and
+many people, and said that neither waiting nor people need be at its base.
+Three things changed.
+
+| Before | Now | Why |
+|---|---|---|
+| A program was a stored machine state, resumed at its suspension point | A program is a pure computation over the ledger of requests, evaluated from the top on every pass (§9) | The truth was readable only by the same runtime version; a team had nothing in common to look at |
+| Code was pinned; an edit started a new instance | A program can be edited while it runs, through a shown difference (§11.2) | Plans change while work is in progress, and starting again asks people twice |
+| A checkpoint of an older machine ABI was refused | An upgrade is an edit with a difference that should be empty | A language that changes weekly cannot strand every program that waits for days |
+| Only a program's requests were requests | A request made in conversation, by a card or by a schedule is the same ledger entry | Each of those had its own rules for who is told when it ends |
+| People were the natural holders of decisions | A person is one kind of participant and never a required step (§1) | Needing a person is usually a limit of capability, and the language should not fix that limit in place |
+
+The reference runtime's stored-state driver, its stores and the tests against
+them remain until the playground and the contract suite run on the ledger
+runtime (`src/runtime/ledger.ts`). §11.1 case 6 describes that older driver.
