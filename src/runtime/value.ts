@@ -56,7 +56,9 @@ export function show(value: Value): string {
       }
       return `${ms}ms`;
     }
-    case "participant": return `@${value.name}${value.instance === null ? "" : `:${value.instance}`}`;
+    case "participant":
+      if (value.name === "anyOf") return `anyOf(${show(value.labels.of)}${value.labels.except ? `, ~except=${show(value.labels.except)}` : ""})`;
+      return `@${value.name}${value.instance === null ? "" : `:${value.instance}`}`;
     case "ref": return `${value.kind}\"${value.value}\"`;
     case "variant": return value.name + (value.args.length ? `(${value.args.map(show).join(", ")})` : "");
     case "list": return `[${value.values.map(show).join(", ")}]`;

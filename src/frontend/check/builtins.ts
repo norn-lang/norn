@@ -8,7 +8,7 @@
  */
 import { TypeTable, typeInfo, type CtorInfo, type TypeInfo } from "./declarations.ts";
 import {
-  FACT, GENERIC, OCCURRENCE, REQUEST, con, fun, newVar, requestOf, source, type FiniteClass, type TLabel, type TParam, type Type,
+  FACT, GENERIC, OCCURRENCE, REQUEST, con, fun, newVar, requestOf, source, tuple, type FiniteClass, type TLabel, type TParam, type Type,
 } from "./types.ts";
 
 /** The effect families of docs/types.md §8, in the order the effects summary lists them. */
@@ -102,6 +102,13 @@ export function builtinValues(): Builtin[] {
       const a = g();
       return fun([t.request(a), t.participant], [], t.request(a));
     }],
+    // The first of several requests to end, with its reply.
+    ["first", "wait", () => {
+      const a = g();
+      return fun([t.list(t.request(a))], [], tuple([t.request(a), t.reply(a)]));
+    }],
+    // Offered to all of them; whoever takes it first holds it, and nobody else does.
+    ["anyOf", null, () => fun([t.list(t.participant)], [optional("except", t.participant)], t.participant)],
     ["cancel", "cancel", () => fun([t.request(g())], [], t.unit)],
     ["status", null, () => {
       const a = g();

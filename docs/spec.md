@@ -266,6 +266,8 @@ request's own deadline (§11.1).
 `~about` names what a request is about: a pull request, a document, a release, an earlier report. It is part of the request's identity (§9), so a request about a new version of a thing is a new request, and an answer about the old version does not stand for it.
 | `r->wait : reply<'a>` | yes | Waits until the request ends. |
 | `r->waitUntil(t) : option<reply<'a>>` | yes | Waits until the request ends or the time or duration `t` passes, whichever is first. `None` means only that this wait ran out; the request stays open. |
+| `anyOf([a, b], ~except=?) : participant` | no | A group as one participant. A request to it is offered to all of them; whoever takes it first holds it, and nobody else does. `~except` leaves one out, as in "the reviewer is not the author". |
+| `first([r1, r2]) : (request<'a>, reply<'a>)` | yes | Waits for the first of several requests to end, and gives that request with its reply. The others stay open. |
 | `handOver(r, who) : request<'a>` | no | Moves the same request to another participant, with a new epoch (§12). The request keeps its `~by`. |
 | `cancel(r) : unit` | no | Calls the request off. It ends `Cancelled` unless it has already ended. |
 | `status(r) : option<reply<'a>>` | no | Looks at the request without waiting: `None` while it is open. |
@@ -400,6 +402,16 @@ let schedule = (~every as period, ~on=never(), task) =>
 
 let digest = (who, ~every as period) =>
   schedule(~every=period, `Tell ${who->show} what changed since they last looked; say nothing if nothing changed`)
+
+// Every reply, in the order the requests were given. They were made before
+// this is called, so they are open together.
+let rec all = requests =>
+  switch requests {
+  | [] => []
+  | [request, ...rest] =>
+    let reply = request->wait
+    [reply, ...all(rest)]
+  }
 ```
 
 Common features of agent products reduce to these functions:

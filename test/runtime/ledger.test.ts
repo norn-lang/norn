@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { parse } from "../../src/frontend/parser.ts";
 import { checkSource, elaborate } from "../../src/frontend/check/index.ts";
 import { referenceOptions } from "../../src/frontend/check/node.ts";
 import { compile } from "../../src/runtime/code.ts";
-import { emptyLedger, establish, evaluate, occur, settle, type Ledger, type Reply } from "../../src/runtime/ledger.ts";
+import { emptyLedger, establish, evaluate, occur, settle, take, type Ledger, type Reply } from "../../src/runtime/ledger.ts";
 import { text, variant, type Value } from "../../src/runtime/value.ts";
 
 const HOUR = 3_600_000;
@@ -266,4 +267,52 @@ switch review->waitUntil(1h) {
   assert.deepEqual([ledger.requests[id].holder, ledger.requests[id].epoch], ["@codex", 2]);
   assert.equal(settle(ledger, id, "@codex", answered(variant("Sound")), HOUR + 1, 0), false);
   assert.ok(settle(ledger, id, "@codex", answered(variant("Flawed", text("no owner on failure"))), HOUR + 2, 2));
+});
+
+test("a request offered to several is taken by exactly one", () => {
+  const code = program(`let round = run(anyOf([@claude, @grok, @codex], ~except=@codex), "Today's audit round")
+round->wait`);
+  const ledger = emptyLedger();
+  evaluate(code, ledger, 0);
+  const id = open(ledger)[0].id;
+  assert.deepEqual(ledger.requests[id].candidates, ["@claude", "@grok"]);
+  assert.equal(take(ledger, id, "@codex", 1), false); // Excepted.
+  assert.ok(take(ledger, id, "@grok", 2));
+  assert.equal(take(ledger, id, "@claude", 3), false); // Someone has it.
+  assert.equal(settle(ledger, id, "@claude", answered(report("done too")), 4), false);
+  assert.ok(settle(ledger, id, "@grok", answered(report("one PR")), 5));
+  assert.equal(evaluate(code, ledger, 5).status, "completed");
+
+  // An answer from one of the group takes the request for them.
+  const direct = emptyLedger();
+  evaluate(code, direct, 0);
+  assert.ok(settle(direct, open(direct)[0].id, "@claude", answered(report("done")), 1));
+  assert.equal(Object.values(direct.requests)[0].holder, "@claude");
+});
+
+test("first gives the earliest reply and leaves the others open; all gives every reply in order", () => {
+  const std = parse(readFileSync(new URL("../../std/std.norn", import.meta.url), "utf8"));
+  if (!std.ok) throw new Error("std does not parse");
+  const build = (source: string) => { const parsed = parse(source); if (!parsed.ok) throw new Error(JSON.stringify(parsed.diagnostics)); return compile(parsed.program, { std: std.program }); };
+  const race = build(`let a = run(@claude, "Try the rewrite")
+let b = run(@codex, "Try the patch")
+let (winner, reply) = first([a, b])
+if winner == a { cancel(b) } else { cancel(a) }
+reply`);
+  const ledger = emptyLedger();
+  evaluate(race, ledger, 0);
+  const [a, b] = open(ledger);
+  settle(ledger, b.id, "@codex", answered(report("patched")), 7);
+  const pass = evaluate(race, ledger, 8);
+  assert.deepEqual(pass.result, variant("Answered", report("patched")));
+  assert.equal(ledger.requests[a.id].reply?.tag, "Cancelled");
+
+  const both = build(`open Std
+all([run(@claude, "Part one"), run(@codex, "Part two")])`);
+  const joined = emptyLedger();
+  assert.equal(evaluate(both, joined, 0).opened.length, 2);
+  const [one, two] = open(joined);
+  settle(joined, two.id, "@codex", answered(report("two")), 1);
+  settle(joined, one.id, "@claude", { tag: "Refused", reason: "busy" }, 2);
+  assert.deepEqual(evaluate(both, joined, 2).result, { type: "list", values: [variant("Refused", text("busy")), variant("Answered", report("two"))] });
 });

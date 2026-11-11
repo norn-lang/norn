@@ -25,3 +25,12 @@ let schedule = (~every as period, ~on=never(), task) =>
 
 let digest = (who, ~every as period) =>
   schedule(~every=period, `Tell ${who->show} what changed since they last looked; say nothing if nothing changed`)
+
+// Every reply, in the order the requests were given. The requests were made before this is called, so they are open together.
+let rec all = requests =>
+  switch requests {
+  | [] => []
+  | [request, ...rest] =>
+    let reply = request->wait
+    [reply, ...all(rest)]
+  }

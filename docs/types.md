@@ -178,6 +178,8 @@ returned unchanged.
 | `judge` | `(string, ~about: 'b=?) => request<bool>` |
 | `wait` | `(source<'k, 'w>) => 'w`: `reply<'a>` for a `request<'a>`, `'a` for an `event<'a>` or a `stream<'a>` |
 | `waitUntil` | `(source<'k, 'w>, 'd) => option<'w>` |
+| `anyOf` | `(list<participant>, ~except: participant=?) => participant` |
+| `first` | `(list<request<'a>>) => (request<'a>, reply<'a>)` |
 | `handOver` | `(request<'a>, participant) => request<'a>` |
 | `cancel` | `(request<'a>) => unit` |
 | `status` | `(request<'a>) => option<reply<'a>>`, which is `None` while the request is open |

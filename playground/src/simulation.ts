@@ -173,7 +173,8 @@ export class Simulation {
     return this.act(() => {
       const request = this.team.ledger.requests[requestId];
       if (request === undefined || request.reply !== null) return false;
-      const accepted = this.team.reply(requestId, request.holder, reply);
+      // The visitor answers a request offered to a group as the first of the group, who takes it.
+      const accepted = this.team.reply(requestId, request.candidates?.[0] ?? request.holder, reply);
       if (!accepted) {
         const answer = reply.tag === "Answered" ? literal(reply.value) : reply.tag;
         this.timeline.push({ kind: "rejected", at: this.team.now, request: requestInfo(request), answer, reason: this.team.ledger.evidence.at(-1)!.reason });
