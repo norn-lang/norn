@@ -101,6 +101,8 @@ cap.
   reply is a function of the recorded history and the clock, never of when a
   worker looked. A `~by` already reached when the request is recorded ends it
   at once.
+- `take(ledger, id, taker, now)` gives a request offered with `anyOf` to one of
+  its group; an answer from one of the group takes it in the same step.
 - `establish` records a fact, which then holds; `occur` records one stream
   occurrence. Both refuse timers, `never()` and compositions. A wait on a fact
   that already holds ends at once. A wait on a stream takes the first

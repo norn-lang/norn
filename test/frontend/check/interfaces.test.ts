@@ -75,7 +75,7 @@ type state = Open | Closed
 type update = {ticket: ticket, state: state}
 external opened: (string) => event<ticket>
 external updates: (ticket, ~from: participant=?) => stream<update>
-external first: (list<'a>) => option<'a>`, "tickets.norn");
+external head: (list<'a>) => option<'a>`, "tickets.norn");
   assert.deepEqual(host.diagnostics, []);
   const std = standardLibrary(host);
   assert.equal(std.ok, true, describe(std.diagnostics));
@@ -85,7 +85,7 @@ let s = switch u.state {
 | Open => "open"
 | Closed => "closed"
 }
-let f = first([1, 2])
+let f = head([1, 2])
 let r = run(@auto, "x")->wait?
 ignore(f)`, { host, std });
   assert.deepEqual(result.diagnostics, [], describe(result.diagnostics));

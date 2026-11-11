@@ -77,5 +77,6 @@ test("the standard library's types", () => {
     "followUp: (participant, string, ~within: 'a, ~escalateTo: participant) => reply<string> where 'a: deadline",
     "schedule: (string, ~every: duration, ~on: stream<'a>=?) => 'b",
     "digest: ('a, ~every: duration) => 'b",
+    "all: (list<(event|stream|request)<'a>>) => list<'a>",
   ]);
 });

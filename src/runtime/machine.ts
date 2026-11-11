@@ -36,8 +36,8 @@ export interface Machine {
 }
 const factBuiltins = new Set(["merged", "released", "machineUpdated", "replied", "runEnded"]);
 const streamBuiltins = new Set(["every", "after", "ciFailed", "prActivity", "docChanged", "message"]);
-const effectBuiltins = new Set(["ask", "confirm", "choose", "run", "wait", "waitUntil", "cancel", "handOver", "status", "say", "judge"]);
-const builtins = new Set([...factBuiltins, ...streamBuiltins, ...effectBuiltins, "now", "show", "ignore", "fail", "or", "never", "map", "filter", "forEach"]);
+const effectBuiltins = new Set(["ask", "confirm", "choose", "run", "wait", "waitUntil", "cancel", "handOver", "status", "say", "judge", "first"]);
+const builtins = new Set([...factBuiltins, ...streamBuiltins, ...effectBuiltins, "now", "show", "ignore", "fail", "or", "never", "map", "filter", "forEach", "anyOf"]);
 
 export function start(code: Code, now = 0): Machine {
   return { control: { kind: "eval", node: code.root, env: "e0" }, frames: [],
@@ -212,6 +212,15 @@ function builtin(code: Code, machine: Machine, name: string, args: Value[], labe
     case "fail": {
       if (args.length !== 1 || Object.keys(labels).length || !failureOutcome(args[0])) throw new Error("fail requires a reply other than Answered");
       machine.frames = []; machine.control = { kind: "failed", outcome: args[0] }; return;
+    }
+    case "anyOf": {
+      const [group] = args, { except, ...other } = labels;
+      if (args.length !== 1 || group.type !== "list" || !group.values.length || group.values.some(v => v.type !== "participant" || v.name === "anyOf") ||
+          Object.keys(other).length || (except !== undefined && except.type !== "participant")) {
+        throw new Error("anyOf needs a nonempty list of participants, and at most ~except");
+      }
+      // A group is a participant: whoever takes the request first holds it, and nobody else does.
+      value = { type: "participant", name: "anyOf", instance: null, labels: { of: group, ...(except === undefined ? {} : { except }) } }; break;
     }
     case "never": {
       if (args.length || Object.keys(labels).length) throw new Error("never takes no arguments");

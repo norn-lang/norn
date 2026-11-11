@@ -17,6 +17,8 @@ export interface LedgerRequest {
   id: string;
   verb: string;
   holder: string;
+  /** For a request offered to a group with `anyOf`: who may take it. Null once taken, and for a request to one participant. */
+  candidates: string[] | null;
   epoch: number;
   text: string;
   /** What `choose` offers; null for every other verb. */
@@ -110,7 +112,7 @@ class ProgramError extends Error {}
 const VERBS = ["ask", "confirm", "choose", "run", "judge"];
 const LABELS: Record<string, string[]> = {
   ask: ["by", "about"], confirm: ["by", "about"], choose: ["by", "about"], run: ["context", "by", "about", "form"], judge: ["about"],
-  wait: [], waitUntil: [], cancel: [], handOver: [], status: [], say: [],
+  wait: [], waitUntil: [], cancel: [], handOver: [], status: [], say: [], first: [],
 };
 
 const replyValue = (reply: Reply): Value =>
@@ -155,6 +157,11 @@ export function settle(ledger: Ledger, id: string, holder: string, reply: Reply,
   settleDue(ledger, now);
   const request = ledger.requests[id];
   if (!request) return false;
+  // An answer from one of a group takes the request for them in the same step.
+  if (request.reply === null && request.candidates?.includes(holder) && (epoch === undefined || epoch === request.epoch) && formError(request, reply) === null) {
+    take(ledger, id, holder, now);
+    epoch = request.epoch;
+  }
   const reason = request.reply !== null ? "The request has already ended"
     : request.holder !== holder || (epoch !== undefined && epoch !== request.epoch) ? "Not the request's holder" : formError(request, reply);
   if (reason !== null) { ledger.evidence.push({ request: id, holder, at: now, reply, reason }); return false; }
@@ -174,6 +181,21 @@ function formError(request: LedgerRequest, reply: Reply): string | null {
       if (request.form === null) return answer.type === "record" && answer.fields.text?.type === "string" ? null : "A report must be a record with text";
       return mismatch(answer, request.form) === null ? null : `The report must be ${request.form.text}: ${mismatch(answer, request.form)}`;
   }
+}
+/** One of a group takes a request offered with `anyOf`: from then on it has exactly that holder. False when someone else has it. */
+export function take(ledger: Ledger, id: string, taker: string, now: number): boolean {
+  settleDue(ledger, now);
+  const request = ledger.requests[id];
+  if (!request || request.reply !== null || !request.candidates?.includes(taker)) return false;
+  request.holder = taker; request.candidates = null; request.epoch++;
+  return true;
+}
+function candidatesOf(who: Value): string[] | null {
+  if (who.type !== "participant" || who.name !== "anyOf") return null;
+  const except = who.labels.except ? show(who.labels.except) : null;
+  const group = (who.labels.of as Extract<Value, { type: "list" | "tuple" }>).values.map(show).filter(name => name !== except);
+  if (!group.length) throw new ProgramError("anyOf leaves nobody to take the request");
+  return [...new Set(group)];
 }
 export function establish(ledger: Ledger, fact: Value, value: Value, now: number): void {
   ledger.facts[external(fact, "fact", "establish")] ??= { at: now, value };
@@ -261,13 +283,14 @@ export function* slices(code: Code, source: Ledger, now: number, options: PassOp
         throw new ProgramError("choose options must be a nonempty list of constructors");
       }
       const { by: _by, ...kept } = labels;
-      const id = identity("request", { name, holder, args: args.slice(name === "judge" ? 0 : 1), labels: kept });
+      // The participant's own arguments count: @auto(~repo="a") and @auto(~repo="b") are asked different things.
+      const id = identity("request", { name, who: name === "judge" ? null : args[0], args: args.slice(name === "judge" ? 0 : 1), labels: kept });
       reached.add(id);
       let request = ledger.requests[id];
       if (!request) {
         if (!permitted()) return revoked();
         request = ledger.requests[id] = {
-          id, verb: name, holder, epoch: 0, text: question.value,
+          id, verb: name, holder, candidates: name === "judge" ? null : candidatesOf(args[0]), epoch: 0, text: question.value,
           options: choices?.type === "list" ? choices.values : null,
           form: labels.form?.type === "string" ? JSON.parse(labels.form.value) as ReportForm : null,
           by: instant(labels.by, now), openedAt: now, reply: null, settledAt: null, detached: false,
@@ -331,6 +354,28 @@ export function* slices(code: Code, source: Ledger, now: number, options: PassOp
       return { value: ended.value as unknown as Value, at: Math.max(ended.at, began) };
     }
 
+    if (name === "first") {
+      const list = args[0];
+      if (args.length !== 1 || list.type !== "list" || !list.values.length) throw new ProgramError("first needs a nonempty list of requests");
+      const requests = list.values.map(value => handle(name, value));
+      const key = identity("first", { ids: requests.map(request => request.id) });
+      let won = ledger.entries[key];
+      if (!won) {
+        const lost = !permitted();
+        for (const request of requests) if (lost && request.reply === null) close(request, { tag: "Revoked" }, now);
+        // The earliest reply wins; at one instant, the request written first.
+        const ended = requests.filter(request => request.reply !== null && request.settledAt! <= now).sort((a, b) => a.settledAt! - b.settledAt!);
+        if (!ended.length) {
+          for (const request of requests) if (request.by !== null) due(request.by);
+          pass.waiting = { targets: requests.map(request => ({ kind: "request", id: request.id })), until: null };
+          return null;
+        }
+        won = ledger.entries[key] = { at: ended[0].settledAt!, value: ended[0].id };
+      }
+      const winner = ledger.requests[won.value as string];
+      return { value: { type: "tuple", values: [{ type: "request", id: winner.id }, replyValue(winner.reply!)] }, at: Math.max(won.at, ledger.startedAt) };
+    }
+
     if (name === "say") {
       if (args.length !== 2 || !["participant", "ref"].includes(args[0].type) || args[1].type !== "string") throw new ProgramError("say needs a participant or a reference, and text");
       const to = show(args[0]), body = args[1].value;
@@ -358,7 +403,7 @@ export function* slices(code: Code, source: Ledger, now: number, options: PassOp
         if (request.reply === null && next === null) close(request, { tag: "Cancelled" }, now);
         else if (request.reply === null) {
           log.push({ kind: "handedOver", id: request.id, from: request.holder, to: next! });
-          request.holder = next!; request.epoch++;
+          request.holder = next!; request.candidates = candidatesOf(args[1]); request.epoch++;
         }
       }
       const at = entry(key, () => ({ at: now, value: null })).at;

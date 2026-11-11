@@ -51,6 +51,8 @@ handle each of these cases.
 | `judge(condition, ~about=?)` | `request<bool>`: the host's judge decides a condition stated in words. |
 | `r->wait` | `reply<'a>` for a request; the value itself for a fact or a stream. |
 | `r->waitUntil(t)` | `option<reply<'a>>` (or `option<'a>` for a fact or stream). `None`: this wait ran out, and the request stays open. |
+| `anyOf([a, b], ~except=?)` | `participant`: a group. Whoever takes the request first holds it; nobody else does. |
+| `first([r1, r2])` | `(request<'a>, reply<'a>)`: the first of several requests to end. The others stay open: cancel them or wait for them. |
 | `handOver(r, who)`, `cancel(r)`, `status(r)` | Give the same request to someone else (same `~by`), call it off, or look at it: `status` returns `option<reply<'a>>`. |
 | `say(to, text)` | `unit`. Posts to a participant or a `doc"…"`/`channel"…"` reference. |
 | `now()`, `show(x)` | The current time; any value rendered as text. |
@@ -60,7 +62,8 @@ handle each of these cases.
 | `a->or(b)` | `stream<either<'a, 'b>>`: either stream, with its value as `First(x)` or `Second(y)`. |
 | `map`, `filter`, `forEach` | Stream functions. `forEach` runs a handler for every occurrence and never returns; the handler returns `()` or a reply. |
 
-`open Std` adds `remind`, `decide`, `followUp`, `schedule` and `digest` (see
+`open Std` adds `remind`, `decide`, `followUp`, `schedule`, `digest` and `all`
+(every reply of a list of requests, in order) (see
 `std/std.norn`).
 
 `request`, `start`, `merge`, `outcome`, `Done`, `Declined`, `Failed`,
@@ -177,6 +180,20 @@ let rec push = () => {
   }
 }
 push()?
+```
+
+**Work in parallel, then join.** Requests are open from the moment they are
+made, so making two before waiting runs them side by side. One round of a
+standing duty goes to exactly one of the team.
+
+```norn
+open Std
+
+let parts = [run(@claude, "Build the API"), run(@codex, "Build the client")]
+switch all(parts) {
+| [Answered(api), Answered(client)] => run(@grok, `Integrate ${api.text} with ${client.text}`)->wait
+| _ => run(anyOf([@claude, @codex, @grok]), "A part failed: find out which and why")->wait
+}
 ```
 
 ## Habits
