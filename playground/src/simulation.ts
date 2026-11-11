@@ -12,6 +12,7 @@
  * as a program failure. Nothing here caps a program's steps.
  */
 import type { Program } from "../../src/frontend/ast.ts";
+import type { ReportForm } from "../../src/frontend/check/index.ts";
 import { Team, compile, variant, type LedgerRequest, type Pass, type Reply, type Value, type Waiting } from "../../src/runtime/browser.ts";
 import { code, either, literal, participant, quote, source, time, type Run } from "./words.ts";
 
@@ -32,6 +33,8 @@ export interface RequestInfo {
   text: string;
   /** The options of a `choose`; `Yes` and `No` for a `confirm`. */
   options: Value[] | null;
+  /** What a `run` must report, when the program decides it; null means the host's report. */
+  form: ReportForm | null;
   /** The request's own deadline (`~by`), on the ledger's clock: past it, the request ends `NoReply`. */
   by: number | null;
 }
@@ -373,6 +376,7 @@ function requestInfo(request: LedgerRequest): RequestInfo {
     name: request.verb as RequestInfo["name"],
     text: request.text,
     options: request.verb === "confirm" ? [variant("Yes"), variant("No")] : request.options,
+    form: request.form,
     by: request.by,
   };
 }

@@ -6,6 +6,7 @@
  * into a runtime value.
  */
 import type * as A from "../../src/frontend/ast.ts";
+import type { Form, ReportForm } from "../../src/frontend/check/index.ts";
 import { lex } from "../../src/frontend/lexer.ts";
 import type { Value } from "../../src/runtime/browser.ts";
 
@@ -79,6 +80,27 @@ export type Field =
   | { kind: "variant"; type: string; constructors: { name: string; args: () => Field[] }[] }
   | { kind: "record"; type: string; fields: { name: string; field: Field }[] }
   | { kind: "unsupported"; type: string };
+
+/** The field for a run's report, from the form the checker gave it. */
+export function fieldForForm(form: Form, definitions: ReportForm["definitions"]): Field {
+  if (form.kind === "any") return { kind: "unsupported", type: "anything" };
+  if (form.kind === "list") return { kind: "unsupported", type: "list" };
+  if (form.kind === "tuple") return { kind: "unsupported", type: "tuple" };
+  if (form.kind === "base") {
+    switch (form.name) {
+      case "string": return { kind: "text", type: "string" };
+      case "int": case "float": return { kind: "number", type: form.name };
+      case "bool": return { kind: "bool" };
+      case "unit": return { kind: "unit" };
+      case "participant": case "ref": case "time": case "duration": return { kind: "literal", type: form.name };
+      default: return { kind: "unsupported", type: form.name };
+    }
+  }
+  const definition = definitions[form.name]!;
+  if (definition.kind === "host") return { kind: "abstract", type: form.name };
+  if (definition.kind === "record") return { kind: "record", type: form.name, fields: definition.fields.map((field) => ({ name: field.name, field: fieldForForm(field.form, definitions) })) };
+  return { kind: "variant", type: form.name, constructors: definition.constructors.map((ctor) => ({ name: ctor.name, args: () => ctor.args.map((arg) => fieldForForm(arg, definitions)) })) };
+}
 
 const NO_SPAN: A.Span = { start: { line: 0, column: 0, offset: 0 }, end: { line: 0, column: 0, offset: 0 } };
 

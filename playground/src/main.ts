@@ -7,6 +7,7 @@ import exampleFiles from "norn:examples";
 import hostSource from "../../hosts/reference.norn";
 import stdSource from "../../std/std.norn";
 import { parse } from "../../src/frontend/parser.ts";
+import { elaborate } from "../../src/frontend/check/elaborate.ts";
 import { problemCount, type CheckReport } from "./check.ts";
 import { createEditor, replaceDoc, reveal, showDiagnostics } from "./editor.ts";
 import { describeExamples, type Example } from "./examples.ts";
@@ -193,7 +194,9 @@ async function run(source: string): Promise<void> {
   running = null;
   let simulation: Simulation;
   try {
-    simulation = await Simulation.start({ program: parsed.program, std: stdTree.program });
+    // The forms come from the check of this same text; a run whose form is unknown reports the host's report.
+    const reports = checked?.source === source ? checked.report.reports : [];
+    simulation = await Simulation.start({ program: elaborate(parsed.program, reports), std: stdTree.program });
   } catch (error) {
     if (mine === generation) runPanel.stop(error instanceof Error ? error.message : String(error));
     return;

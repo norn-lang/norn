@@ -12,7 +12,8 @@ test("the playground reports what norn check reports, from bundled text", () => 
   for (const source of [read("examples/follow-up.norn"), "open Std\nlet c = remind(@bob, \"Look\", ~at=2h)", "switch ask(@alice, \"Ship?\") {\n| Done(x) => x\n}"]) {
     const report = check(source);
     const reference = checkSource(source, referenceOptions());
-    assert.deepEqual(report, { ok: reference.ok, diagnostics: reference.diagnostics, effects: reference.effects, bindings: reference.bindings });
+    const reports = reference.reports.map(({ node, form }) => ({ node: { kind: node.kind, span: node.span }, form }));
+    assert.deepEqual(report, { ok: reference.ok, diagnostics: reference.diagnostics, effects: reference.effects, bindings: reference.bindings, reports });
     assert.deepEqual(JSON.parse(JSON.stringify(report)), report, "a report crosses to the page as plain data");
   }
 });

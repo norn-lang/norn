@@ -1,7 +1,9 @@
 // The ledger is the only durable state (spec §9, §11). A program keeps no
 // snapshot: every pass evaluates it from the top against the ledger and
 // reports which requests should exist now. Nothing here dispatches anything.
+import type { ReportForm } from "../frontend/check/forms.ts";
 import type { Code } from "./code.ts";
+import { mismatch } from "./form.ts";
 import { advance, resume, start, type Effect } from "./machine.ts";
 import { sha256 } from "./sha256.ts";
 import { equal, eventKey, show, text, unit, variant, type Json, type Value } from "./value.ts";
@@ -19,6 +21,8 @@ export interface LedgerRequest {
   text: string;
   /** What `choose` offers; null for every other verb. */
   options: Value[] | null;
+  /** What a `run` must report, when the checker decided it (docs/types.md §5a); null means the host's report. */
+  form: ReportForm | null;
   by: number | null;
   openedAt: number;
   reply: Reply | null;
@@ -105,7 +109,7 @@ class ProgramError extends Error {}
 
 const VERBS = ["ask", "confirm", "choose", "run", "judge"];
 const LABELS: Record<string, string[]> = {
-  ask: ["by"], confirm: ["by"], choose: ["by"], run: ["context", "by"], judge: ["about"],
+  ask: ["by", "about"], confirm: ["by", "about"], choose: ["by", "about"], run: ["context", "by", "about", "form"], judge: ["about"],
   wait: [], waitUntil: [], cancel: [], handOver: [], status: [], say: [],
 };
 
@@ -142,11 +146,17 @@ export function settleDue(ledger: Ledger, now: number): LedgerRequest[] {
   return closed;
 }
 /** The first valid answer from the current holder settles a request; anything else is kept as evidence. */
-export function settle(ledger: Ledger, id: string, holder: string, reply: Reply, now: number): boolean {
+/**
+ * `epoch` is the one the answer was given under. A host passes it so that an
+ * answer from an earlier holding does not count after the request has come
+ * back to the same participant.
+ */
+export function settle(ledger: Ledger, id: string, holder: string, reply: Reply, now: number, epoch?: number): boolean {
   settleDue(ledger, now);
   const request = ledger.requests[id];
   if (!request) return false;
-  const reason = request.reply !== null ? "The request has already ended" : request.holder !== holder ? "Not the request's holder" : formError(request, reply);
+  const reason = request.reply !== null ? "The request has already ended"
+    : request.holder !== holder || (epoch !== undefined && epoch !== request.epoch) ? "Not the request's holder" : formError(request, reply);
   if (reason !== null) { ledger.evidence.push({ request: id, holder, at: now, reply, reason }); return false; }
   request.reply = reply; request.settledAt = now;
   return true;
@@ -160,7 +170,9 @@ function formError(request: LedgerRequest, reply: Reply): string | null {
     case "confirm": return answer.type === "variant" && ["Yes", "No"].includes(answer.name) && !answer.args.length ? null : "The answer must be Yes or No";
     case "choose": return request.options!.some(option => equal(option, answer)) ? null : "The answer is not one of the options";
     case "judge": return answer.type === "bool" ? null : "A judgement must be true or false";
-    default: return answer.type === "record" && answer.fields.text?.type === "string" ? null : "A report must be a record with text";
+    default:
+      if (request.form === null) return answer.type === "record" && answer.fields.text?.type === "string" ? null : "A report must be a record with text";
+      return mismatch(answer, request.form) === null ? null : `The report must be ${request.form.text}: ${mismatch(answer, request.form)}`;
   }
 }
 export function establish(ledger: Ledger, fact: Value, value: Value, now: number): void {
@@ -257,6 +269,7 @@ export function* slices(code: Code, source: Ledger, now: number, options: PassOp
         request = ledger.requests[id] = {
           id, verb: name, holder, epoch: 0, text: question.value,
           options: choices?.type === "list" ? choices.values : null,
+          form: labels.form?.type === "string" ? JSON.parse(labels.form.value) as ReportForm : null,
           by: instant(labels.by, now), openedAt: now, reply: null, settledAt: null, detached: false,
         };
         log.push({ kind: "opened", request: { ...request } });
