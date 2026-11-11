@@ -36,7 +36,7 @@ export interface SourceCheck extends CheckResult {
 /** Parses a program's source and checks it against a host interface and, for `open Std`, a standard library. */
 export function checkSource(source: string, options: CheckOptions): SourceCheck {
   const parsed = parse(source);
-  if (!parsed.ok) return { ok: false, diagnostics: parsed.diagnostics.map(syntax), bindings: [], effects: null, program: null };
+  if (!parsed.ok) return { ok: false, diagnostics: parsed.diagnostics.map(syntax), bindings: [], effects: null, reports: [], program: null };
   return { ...checkProgram(parsed.program, options), program: parsed.program };
 }
 

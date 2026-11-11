@@ -56,6 +56,7 @@ export const CODES = {
   "or-pattern-bindings": "alternatives of a pattern that bind different names",
   "later-parameter": "a default value that uses a labelled parameter declared after it",
   "choose-options": "options of choose that are not constructors of one variant type",
+  "report-form": "a run whose report would hold a function, a request, a fact, a stream or a reply",
   "try-operand": "? on a value that is not a reply, option or result",
   "try-return": "? in a function that returns another family than the value under ?",
   "non-exhaustive": "a switch that does not handle every case",
