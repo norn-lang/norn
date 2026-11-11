@@ -16,7 +16,7 @@ The syntax is ReScript. Participants are values like `@alice`; a request's own d
 - [Language spec](https://raw.githubusercontent.com/norn-lang/norn/main/docs/spec.md): what Norn is, its syntax, effects, standard library, safety rules, runtime protocol, and what changed from the first draft (§15)
 - [Types](https://raw.githubusercontent.com/norn-lang/norn/main/docs/types.md): inference, built-in signatures, exhaustiveness, the rule that requests and replies are never dropped, host interfaces and diagnostics
 - [Syntax tree](https://raw.githubusercontent.com/norn-lang/norn/main/docs/ast.md): the AST and its versioned JSON form
-- [Reference runtime](https://raw.githubusercontent.com/norn-lang/norn/main/docs/reference-runtime.md): how to run programs against the simulated host
+- [Reference runtime](https://raw.githubusercontent.com/norn-lang/norn/main/docs/reference-runtime.md): the ledger runtime, and how to run programs against the simulated team
 
 ## Optional
 

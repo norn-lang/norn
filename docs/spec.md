@@ -5,8 +5,8 @@
 > [Changes from the first draft](#15-changes-from-the-first-draft). The
 > durable state became a ledger of requests instead of a stored program
 > state: see [The ledger](#16-the-ledger-2026-11-11). A local reference
-> implementation (a parser, a durable evaluator and a simulated host) runs
-> four of the §3 examples from source
+> implementation (a parser, an evaluator over the ledger and a simulated
+> team) runs the five §3 examples from source
 > ([reference runtime](reference-runtime.md)). No production host implements
 > it yet. The language sections were drafted by Claude.
 > The runtime protocol (§11) is based on research by Codex
@@ -490,8 +490,8 @@ The language fixes a portable kernel. Hosts implement a contract.
   - event observation;
   - time;
   - authorization results;
-- a local durable store and clock, so examples and restart tests run without
-  any host;
+- a local simulated team and clock over a ledger that is plain JSON, so
+  examples and restart tests run without any host;
 - a deterministic failure-injection conformance suite that every host must
   pass.
 
@@ -555,10 +555,10 @@ it.
   occurrence's value itself, with no `Answered` around it. A loss of the program's authority during
   such a wait ends the program `Revoked`.
 - **`or` keeps values.** `a->or(b)` delivers `First(x)` or `Second(y)`, with
-  the occurrence's own value. Nesting composes: the path of `First`/`Second`
-  constructors is stored with the wait's registration, so it survives a
-  restart, and an occurrence recorded before a crash is delivered after it
-  once, with the same value and path.
+  the occurrence's own value. Nesting composes: the wait's result is recorded
+  with its path of `First`/`Second` constructors, so it survives a restart,
+  and an occurrence recorded before a crash is delivered after it once, with
+  the same value and path.
 
 **Contract cases.** The redesign of §15 adds these cases to the conformance
 suite. Each states the input history and the one allowed result.
@@ -584,32 +584,35 @@ suite. Each states the input history and the one allowed result.
    `First(Second(y))` for an occurrence `y` of `b`. A crash after the
    occurrence is recorded and before the program resumes delivers the same
    value once after restart.
-6. **ABI and store version bump.** Checkpoints and stores written before this
-   redesign hold `outcome` values, `merge` waits, wait-level `TimedOut`
-   results and `~until` deadlines. The runtime bumps its machine ABI
-   (`norn-cek:3` → `norn-cek:4`) and its store schema (7 → 8). A checkpoint or
-   store of an older version is refused with an error that names both
-   versions; it is never reinterpreted under the new built-ins, and nothing
-   migrates it silently.
+6. **A new version of the code is not refused.** A ledger holds no machine
+   state, ABI version, store schema or code identity, so there is nothing to
+   refuse (§16). A program whose text changed and which makes the same
+   requests has an empty difference against its ledger: nobody is asked
+   again, and nothing is cancelled. A process restart is the same pass over
+   the ledger's JSON. Checkpoints and stores written by the stored-state
+   runtime before 2026-11-11 are not read by anything; no migration exists.
 
 **Conformance cases.** The reference runtime has local checks for the cases
-marked ✓, against its SQLite store and simulated host. A host-independent
-suite that every host runs is still to be written.
+marked ✓, against its ledger and simulated team. The reference runtime
+dispatches nothing, so the cases about delivery are unchecked. A
+host-independent suite that every host runs is still to be written.
 
-- ✓ a person replies after a long wait and a host restart;
+- ✓ a person replies after a long wait and a restart from the ledger's JSON
+  on disk;
 - ✓ a fact that already held before the wait;
-- ✓ concurrent workers; duplicate events are not checked yet;
-- ✓ a crash between recording an intent and dispatching it;
-- ✓ a crash between dispatch and receipt;
+- ✓ repeated passes, and two passes over the same ledger, open and report
+  nothing twice; two processes writing one ledger at once and duplicate
+  events are not checked;
+- a crash between recording an intent and dispatching it;
+- a crash between dispatch and receipt;
 - ✓ a reply racing a deadline; a deleted source is not checked yet;
-- ✓ the six contract cases of §11.1, including shared Memory/SQLite checks,
-  nested `or` through disk restart, and explicit ABI/store version refusal;
+- ✓ the six contract cases of §11.1, with nested `or` through a disk restart;
 - cancellation while an agent is already running;
-- ✓ permission withdrawn while suspended;
-- ✓ a definition or ABI change is refused on resumption; migration is not
-  implemented;
+- ✓ permission withdrawn while waiting;
+- ✓ an edited program keeps the requests it still makes, and a change of
+  code that changes no request is an empty difference;
 - bursts of stream events;
-- ✓ pure loops that never wait;
+- ✓ pure loops that never wait fail in the open at the pass's step budget;
 - ✓ handing over a request without duplicating its rights.
 
 ### 11.2 Changing a program while it runs
@@ -779,8 +782,7 @@ The first draft of this spec (2026-11-06) used one word for several things.
 Daniel, the project's owner, found its syntax and semantics too ambiguous to
 read reliably, so the surface was redesigned around one rule: **one word, one
 meaning; a name says who acted and why.** The runtime's semantics were
-reviewed with Codex. Old programs do not check or run under the new names, and
-old checkpoints are refused (§11.1, case 6).
+reviewed with Codex. Old programs do not check or run under the new names.
 
 | First draft | Now | Why |
 |---|---|---|
@@ -814,6 +816,6 @@ Three things changed.
 | Only a program's requests were requests | A request made in conversation, by a card or by a schedule is the same ledger entry | Each of those had its own rules for who is told when it ends |
 | People were the natural holders of decisions | A person is one kind of participant and never a required step (§1) | Needing a person is usually a limit of capability, and the language should not fix that limit in place |
 
-The reference runtime's stored-state driver, its stores and the tests against
-them remain until the playground and the contract suite run on the ledger
-runtime (`src/runtime/ledger.ts`). §11.1 case 6 describes that older driver.
+The reference runtime's stored-state driver and its stores were removed once
+the playground and the contract suite ran on the ledger runtime
+(`src/runtime/ledger.ts`).

@@ -116,7 +116,7 @@ test("release-chain.norn waits on facts the visitor makes hold, in order", async
   await simulation.fire(simulation.state.events[0]!.source, text("acme/api#1436"));
   assert.equal(waiting(simulation), "Waiting for released(Beta, ~containing=\"acme/api#1436\") to hold until 2026-11-08 09:00 UTC");
   await simulation.fire(simulation.state.events[0]!.source, { type: "record", fields: { version: text("2.4.0") } });
-  assert.equal(waiting(simulation), "Waiting for machineUpdated(~atLeast=\"2.4.0\", ~machine=\"win-builder\") to hold");
+  assert.equal(waiting(simulation), "Waiting for machineUpdated(~machine=\"win-builder\", ~atLeast=\"2.4.0\") to hold");
   await simulation.fire(simulation.state.events[0]!.source, text("2.4.1"));
   await simulation.answer(simulation.state.requests[0]!.id, report("The long-path fix works"));
   assert.equal(simulation.state.status, "completed");
@@ -195,7 +195,7 @@ test("never() waits for nothing but its deadline", async () => {
   simulation.dispose();
 });
 
-test("a program that never waits keeps computing until it is restarted, and the page gets its turns", async () => {
+test("a program that never waits gives the page its turns while it computes, then fails in the open", async () => {
   let turns = 0;
   const simulation = await Simulation.start({
     program: tree("let rec spin = n => spin(n + 1)\nspin(0)"),
@@ -205,8 +205,19 @@ test("a program that never waits keeps computing until it is restarted, and the 
   while (turns < 3) await new Promise((resolve) => setTimeout(resolve, 5));
   assert.equal(simulation.state.status, "ready");
   assert.equal(simulation.state.computing, true);
+  // The pass has a step budget: past it the program has failed, and the page says so instead of spinning for ever.
+  await simulation.settled();
+  assert.deepEqual([simulation.state.status, simulation.state.computing], ["failed", false]);
+  assert.equal(story(simulation).at(-1), "09:00 Failed with a program error: “The program computed for too long without waiting or finishing”. The author is told.");
+  simulation.dispose();
+});
+
+test("restarting a program that is still computing stops it", async () => {
+  const simulation = await Simulation.start({ program: tree("let rec spin = n => spin(n + 1)\nspin(0)"), std, pause: () => new Promise((resolve) => setTimeout(resolve, 0)) });
+  await new Promise((resolve) => setTimeout(resolve, 30));
   simulation.dispose();
   await simulation.settled();
+  assert.deepEqual([simulation.state.status, simulation.state.computing], ["ready", true]);
 });
 
 test("a replaced run refuses further moves", async () => {
@@ -218,17 +229,17 @@ test("a replaced run refuses further moves", async () => {
   await assert.rejects(simulation.advance(HOUR), /restarted/);
 });
 
-test("an answer the host cannot map is neither a refusal nor a choice: the request stays open", async () => {
+test("an answer outside the request's form is neither a refusal nor a choice: the request stays open", async () => {
   const simulation = await start(read("examples/decide.norn"));
   const [question] = simulation.state.requests;
   assert.equal(await simulation.answer(question!.id, variant("Later")), false);
   assert.equal(simulation.state.status, "suspended");
   assert.deepEqual(simulation.state.requests.map((request) => request.id), [question!.id]);
-  assert.equal(story(simulation).at(-1), "09:00 The answer Later from @alice was not taken: “Answer must be Yes or No”. The request stays open.");
+  assert.equal(story(simulation).at(-1), "09:00 The answer Later from @alice was not taken: “The answer must be Yes or No”. The request stays open.");
   // A choose takes only its own options.
   const choice = await start('type plan = Ship | Drop\nswitch choose(@alice, "Ship?", [Ship, Drop])->wait {\n| Answered(Ship) => ()\n| _ => ()\n}');
   assert.equal(await choice.answer(choice.state.requests[0]!.id, variant("Yes")), false);
-  assert.equal(story(choice).at(-1), "09:00 The answer Yes from @alice was not taken: “Answer did not match a declared option”. The request stays open.");
+  assert.equal(story(choice).at(-1), "09:00 The answer Yes from @alice was not taken: “The answer is not one of the options”. The request stays open.");
   assert.equal(await choice.answer(choice.state.requests[0]!.id, variant("Ship")), true);
   assert.equal(choice.state.status, "completed");
   simulation.dispose();

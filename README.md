@@ -3,8 +3,8 @@
 **The coordination language for teams of people and AI agents.**
 
 > Status: design draft, with a local reference implementation: a parser, a
-> durable evaluator and a simulated host, which run four of the spec's
-> examples from source ([reference runtime](docs/reference-runtime.md)).
+> evaluator over a ledger of requests and a simulated team, which run five of
+> the spec's examples from source ([reference runtime](docs/reference-runtime.md)).
 > There is no production host yet. The spec is open for discussion: open an
 > issue.
 
@@ -114,7 +114,7 @@ their work together borrows its name.
 - [Types and the type checker](docs/types.md)
 - [Syntax tree (AST) and syntax decisions](docs/ast.md)
 - [Durable runtime research](docs/research/runtime.md)
-- [Browser runtime and pinned Std imports](docs/browser-runtime.md)
+- [Reference runtime: the ledger, a simulated team, the browser entry and Std](docs/reference-runtime.md)
 - For models: [a skill for writing Norn](skills/norn/SKILL.md) and [llms.txt](llms.txt)
 
 ## Building
@@ -150,7 +150,7 @@ The [playground](https://norn-lang.org/norn/) checks Norn as you type, with
 the same checker as `norn check`, and runs the program in the browser against
 a simulated team: you answer, refuse or break its requests, move the clock and
 fire the host's facts and streams, and watch it wait, run past deadlines, hand
-over and finish. It runs the reference runtime with an in-memory store; nothing leaves
+over and finish. It runs the reference runtime over an in-memory ledger; nothing leaves
 the page. Its source is in [`playground`](playground); it is the one part of
 this repository with a build step, which bundles it with esbuild and
 CodeMirror.
@@ -163,7 +163,7 @@ npm run playground:build   # build it into playground/dist
 ## Hosts
 
 A host implements Norn's effects: who the participants are, how requests reach
-them, which events exist, and where waiting programs are stored.
+them, which events exist, and where the ledger of requests is kept.
 [xMatrix](https://github.com/LambdaLabsHQ/xmatrix) is the first host. The
 language does not depend on it.
 

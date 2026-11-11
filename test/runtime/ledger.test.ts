@@ -135,7 +135,7 @@ test("a change of code identity that changes no request is an empty difference",
   const original = program(decision);
   evaluate(original, ledger, 0);
   const upgraded = program(`// Reformatted by a newer toolchain.\n${decision}\n`);
-  assert.notEqual(upgraded.id, original.id); // The snapshot runtime refuses this: "Pinned code identity mismatch".
+  assert.notEqual(upgraded.id, original.id); // A ledger holds no code identity to refuse.
   const pass = evaluate(upgraded, ledger, 5, { commit: false });
   assert.deepEqual([pass.opened, pass.unreached, pass.cancelled, pass.rescheduled], [[], [], [], []]);
 });

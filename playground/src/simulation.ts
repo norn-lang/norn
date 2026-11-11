@@ -1,26 +1,25 @@
 /**
  * A program running against a simulated team, in the page. The visitor plays
  * the team: answers, refuses or breaks requests, moves the virtual clock and
- * fires the host's facts and streams. This module drives the reference
- * runtime (`src/runtime/browser.ts`) and keeps what happened as a timeline of
- * plain data; it knows nothing of the page.
+ * fires the host's facts and streams. This module drives the ledger runtime
+ * (`src/runtime/browser.ts`) and keeps what happened as a timeline of plain
+ * data; it knows nothing of the page.
  *
- * The runtime time-slices pure computation. Between slices this module gives
- * the page a turn, so a program that loops without waiting keeps running, and
- * the page stays responsive, until the visitor restarts it. Nothing here caps
- * a program's steps.
+ * After everything the visitor does, the program is evaluated again from the
+ * top against the ledger. A pass yields between slices of computation, and
+ * this module gives the page a turn there, so a program that loops without
+ * waiting leaves the page responsive until the runtime's step budget ends it
+ * as a program failure. Nothing here caps a program's steps.
  */
 import type { Program } from "../../src/frontend/ast.ts";
-import {
-  MemoryStore, Runtime, SimulatedHost, VirtualClock, compile, text, variant,
-  type Checkpoint, type ExecutionStatus, type Json, type RequestOutcome, type StoredWait, type Value, type WaitOutcome,
-} from "../../src/runtime/browser.ts";
+import { Team, compile, variant, type LedgerRequest, type Pass, type Reply, type Value, type Waiting } from "../../src/runtime/browser.ts";
 import { code, either, literal, participant, quote, source, time, type Run } from "./words.ts";
 
 /** When every simulation starts: 09:00 UTC on 7 November 2026, three hours before decide.norn's deadline. */
 export const START = Date.UTC(2026, 10, 7, 9, 0);
 
-const EXECUTION = "playground";
+/** `ready` while the first pass computes, `suspended` while the program waits; `revoked` is a failure whose result is `Revoked`. */
+export type Status = "ready" | "suspended" | "completed" | "failed" | "revoked";
 
 /** A request as the program made it. */
 export interface RequestInfo {
@@ -33,15 +32,15 @@ export interface RequestInfo {
   text: string;
   /** The options of a `choose`; `Yes` and `No` for a `confirm`. */
   options: Value[] | null;
-  /** The request's own deadline (`~by`), on the store's clock: past it, the request ends `NoReply`. */
+  /** The request's own deadline (`~by`), on the ledger's clock: past it, the request ends `NoReply`. */
   by: number | null;
 }
 
 export type Entry =
   | { kind: "offered"; at: number; request: RequestInfo }
   | { kind: "handedOver"; at: number; request: RequestInfo; from: string; to: string }
-  | { kind: "closed"; at: number; request: RequestInfo; outcome: RequestOutcome }
-  /** An answer the host could not map, such as an option the request did not offer: kept as evidence, and the request stays open. */
+  | { kind: "closed"; at: number; request: RequestInfo; outcome: Reply }
+  /** An answer outside the request's form, such as an option it did not offer: kept as evidence, and the request stays open. */
   | { kind: "rejected"; at: number; request: RequestInfo; answer: string; reason: string }
   | { kind: "said"; at: number; to: string; text: string }
   /** `targets` reads after "Waiting", as in "for @alice’s answer to “…”"; `deadline` after that, as in " until 2026-11-07 12:00 UTC". */
@@ -53,7 +52,7 @@ export type Entry =
   | { kind: "fired"; at: number; source: string; mode: "fact" | "stream"; value: string }
   | { kind: "handlerFailed"; at: number; outcome: string }
   /** `outcome` is the program's result, or the text of a program error when `error` is true. */
-  | { kind: "ended"; at: number; status: Exclude<ExecutionStatus, "ready" | "suspended">; outcome: string; error: boolean };
+  | { kind: "ended"; at: number; status: Exclude<Status, "ready" | "suspended">; outcome: string; error: boolean };
 
 export interface OpenRequest extends RequestInfo {
   epoch: number;
@@ -69,8 +68,8 @@ export interface AwaitedEvent {
 
 export interface SimulationState {
   now: number;
-  status: ExecutionStatus;
-  /** The program is computing between waits: a long or endless loop shows here. */
+  status: Status;
+  /** A pass is under way: a long or endless loop shows here. */
   computing: boolean;
   /** What the program waits for, in words, and until when. */
   waiting: { targets: Run[]; deadline: Run[]; until: number | null } | null;
@@ -89,55 +88,40 @@ export interface SimulationOptions {
   start?: number;
   /** Called whenever the state changes. */
   onChange?: (state: SimulationState) => void;
-  /** Gives the page a turn between slices of a long computation. */
+  /** Gives the page a turn between slices of a long pass. */
   pause?: () => Promise<void>;
 }
 
-const TERMINAL: ReadonlySet<ExecutionStatus> = new Set(["completed", "failed", "revoked", "cancelled"]);
-
 export class Simulation {
-  private readonly clock: VirtualClock;
-  private readonly store: MemoryStore;
-  private readonly host: SimulatedHost;
-  private readonly runtime: Runtime;
+  private readonly team: Team;
   private readonly listeners = new Set<(state: SimulationState) => void>();
   private readonly pause: () => Promise<void>;
 
   private readonly timeline: Entry[] = [];
+  /** Requests as the timeline last told them: a handover changes the holder. */
   private readonly requests = new Map<string, RequestInfo>();
-  private readonly seenEffects = new Set<string>();
-  /** Waits seen, and whether their outcome is in the timeline yet. */
-  private readonly waits = new Map<string, boolean>();
-  private checkpoint: Checkpoint | null = null;
-  private computing = false;
+  /** How many of the team's events the timeline has told. */
+  private told = 0;
+  private last: Pass | null = null;
+  private computing = true;
   private error: string | null = null;
-  private fired = 0;
   private acted = false;
   private disposed = false;
-  private running: Promise<void> | null = null;
-  private again = false;
-  /** Every change to the store, one at a time. */
+  /** Everything done to the team, one at a time: the ledger must not change while a pass is under way. */
   private tail: Promise<unknown> = Promise.resolve();
   private snapshot: SimulationState;
 
   private constructor(options: SimulationOptions) {
-    this.clock = new VirtualClock(options.start ?? START);
-    this.store = new MemoryStore(this.clock);
-    this.host = new SimulatedHost(this.store, this.clock);
-    this.runtime = new Runtime(compile(options.program, { std: options.std }), this.store, this.host);
+    this.team = new Team(compile(options.program, { std: options.std }), { now: options.start ?? START });
     if (options.onChange !== undefined) this.listeners.add(options.onChange);
     this.pause = options.pause ?? (() => new Promise((resolve) => setTimeout(resolve, 0)));
-    this.snapshot = {
-      now: this.clock.now(), status: "ready", computing: true, waiting: null, requests: [], events: [], nextDeadline: null, timeline: [], error: null,
-    };
+    this.snapshot = this.current();
   }
 
   /** Starts a program: it runs until it first waits, or for as long as it computes. */
   static async start(options: SimulationOptions): Promise<Simulation> {
     const simulation = new Simulation(options);
-    await simulation.runtime.create(EXECUTION);
-    await simulation.exclusive(() => simulation.observe());
-    simulation.run();
+    void simulation.exclusive(() => simulation.pass());
     return simulation;
   }
 
@@ -159,57 +143,48 @@ export class Simulation {
 
   /** Resolves once the program has nothing left to do until the visitor acts. */
   async settled(): Promise<void> {
-    while (this.running !== null) await this.running;
+    for (let tail; tail !== this.tail;) await (tail = this.tail);
   }
 
   /** Stops the program for good, as Restart does. */
   dispose(): void {
     this.disposed = true;
-    void this.exclusive(() => this.store.close());
   }
 
   // The visitor's actions --------------------------------------------------------
 
-  /**
-   * Replies to a request as its holder: Answered with a value, Refused or
-   * Broke with a reason. An answer the host cannot map is refused at its
-   * boundary; the timeline says so, and the request stays open.
-   */
-  async reply(requestId: string, outcome: Value): Promise<boolean> {
-    return this.act(async () => {
-      const request = await this.store.request(requestId);
-      if (request === null || request.outcome !== null) return false;
-      const accepted = await this.host.reply(request, outcome);
+  /** Answers a request as its holder. An answer outside the request's form is not taken; the timeline says so, and the request stays open. */
+  answer(requestId: string, value: Value): Promise<boolean> {
+    return this.reply(requestId, { tag: "Answered", value });
+  }
+
+  refuse(requestId: string, reason: string): Promise<boolean> {
+    return this.reply(requestId, { tag: "Refused", reason });
+  }
+
+  broke(requestId: string, reason: string): Promise<boolean> {
+    return this.reply(requestId, { tag: "Broke", reason });
+  }
+
+  private reply(requestId: string, reply: Reply): Promise<boolean> {
+    return this.act(() => {
+      const request = this.team.ledger.requests[requestId];
+      if (request === undefined || request.reply !== null) return false;
+      const accepted = this.team.reply(requestId, request.holder, reply);
       if (!accepted) {
-        const evidence = (await this.store.requestEvidence(requestId)).at(-1);
-        const info = this.requests.get(requestId);
-        const answer = outcome.type === "variant" && outcome.name === "Answered" && outcome.args.length === 1 ? outcome.args[0]! : outcome;
-        if (info !== undefined && evidence?.invalidReason != null) {
-          this.timeline.push({ kind: "rejected", at: this.clock.now(), request: { ...info, holder: request.holder }, answer: literal(answer), reason: evidence.invalidReason });
-        }
+        const answer = reply.tag === "Answered" ? literal(reply.value) : reply.tag;
+        this.timeline.push({ kind: "rejected", at: this.team.now, request: requestInfo(request), answer, reason: this.team.ledger.evidence.at(-1)!.reason });
       }
       return accepted;
     });
   }
 
-  answer(requestId: string, value: Value): Promise<boolean> {
-    return this.reply(requestId, variant("Answered", value));
-  }
-
-  refuse(requestId: string, reason: string): Promise<boolean> {
-    return this.reply(requestId, variant("Refused", text(reason)));
-  }
-
-  broke(requestId: string, reason: string): Promise<boolean> {
-    return this.reply(requestId, variant("Broke", text(reason)));
-  }
-
   /** Fires a fact, which then holds, or one occurrence of a stream. */
-  async fire(event: Extract<Value, { type: "source" }>, value: Value): Promise<boolean> {
-    return this.act(async () => {
-      const accepted = await this.host.emit(`fired-${++this.fired}`, event, value);
-      if (accepted) this.timeline.push({ kind: "fired", at: this.clock.now(), source: source(event), mode: event.kind, value: literal(value) });
-      return accepted;
+  fire(event: Extract<Value, { type: "source" }>, value: Value): Promise<boolean> {
+    return this.act(() => {
+      this.team.emit(event, value);
+      this.timeline.push({ kind: "fired", at: this.team.now, source: source(event), mode: event.kind, value: literal(value) });
+      return true;
     });
   }
 
@@ -220,40 +195,36 @@ export class Simulation {
   async advanceTo(target: number): Promise<void> {
     for (;;) {
       const next = this.snapshot.nextDeadline;
-      if (next === null || next > target || next <= this.clock.now() || this.disposed) break;
-      await this.act(() => this.host.advanceTo(next));
+      if (next === null || next > target || next <= this.team.now || this.disposed) break;
+      await this.act(() => this.team.advanceTo(next));
     }
-    if (target > this.clock.now()) await this.act(() => this.host.advanceTo(target));
+    if (target > this.team.now) await this.act(() => this.team.advanceTo(target));
   }
 
   advance(ms: number): Promise<void> {
-    return this.advanceTo(this.clock.now() + ms);
+    return this.advanceTo(this.team.now + ms);
   }
 
   // Running ------------------------------------------------------------------------
 
   /** Does what the visitor did, then lets the program react: the promise resolves once it waits or ends again. */
-  private async act<T>(action: () => Promise<T>): Promise<T> {
+  private async act<T>(action: () => T): Promise<T> {
     if (this.disposed) throw new Error("This simulation has been restarted");
     this.acted = true;
-    let result: T | undefined;
-    try {
-      result = await this.exclusive(async () => {
-        const value = await action();
-        await this.observe();
-        return value;
-      });
-    } catch (error) {
-      // The runtime failed, not the program: the page shows it, and the run stops.
+    return this.exclusive(async () => {
       if (this.disposed) throw new Error("This simulation has been restarted");
-      this.error = error instanceof Error ? error.message : String(error);
-      this.snapshot = { ...this.snapshot, error: this.error };
-      this.notify();
-      return undefined as T;
-    }
-    this.run();
-    await this.settled();
-    return result;
+      // After the runtime itself failed, nothing more is done: the page shows the error.
+      if (this.error !== null) return undefined as T;
+      let result: T;
+      try {
+        result = action();
+      } catch (error) {
+        this.fail(error);
+        return undefined as T;
+      }
+      await this.pass();
+      return result;
+    });
   }
 
   private exclusive<T>(work: () => Promise<T>): Promise<T> {
@@ -262,164 +233,109 @@ export class Simulation {
     return next;
   }
 
-  /** Steps the program until it waits or ends, one slice at a time, observing each. */
-  private run(): void {
-    if (this.running !== null) {
-      this.again = true;
-      return;
-    }
-    this.running = (async () => {
-      try {
-        let last = performance.now();
-        do {
-          this.again = false;
-          for (;;) {
-            if (this.disposed || this.error !== null) return;
-            const advanced = await this.exclusive(async () => {
-              const count = await this.host.pump(this.runtime, 1);
-              await this.observe();
-              return count;
-            });
-            if (advanced === 0) break;
-            if (performance.now() - last > 12) {
-              this.notify();
-              await this.pause();
-              last = performance.now();
-            }
-          }
-        } while (this.again);
-      } catch (error) {
-        this.error = error instanceof Error ? error.message : String(error);
-      } finally {
-        this.running = null;
-        this.computing = false;
-        this.snapshot = { ...this.snapshot, computing: false, error: this.error };
-        this.notify();
+  /** One pass of the program, giving the page a turn whenever it has computed for a frame. */
+  private async pass(): Promise<void> {
+    try {
+      const pass = this.team.slices();
+      let last = performance.now();
+      for (;;) {
+        if (this.disposed) return;
+        const slice = pass.next();
+        if (slice.done) {
+          this.last = slice.value;
+          break;
+        }
+        if (performance.now() - last > 12) {
+          this.publish(true);
+          await this.pause();
+          last = performance.now();
+        }
       }
-    })();
+      this.publish(false);
+    } catch (error) {
+      this.fail(error);
+    }
   }
 
-  private notify(): void {
+  /** The runtime failed, not the program: the page shows it, and the run stops. */
+  private fail(error: unknown): void {
+    this.error = error instanceof Error ? error.message : String(error);
+    this.publish(false);
+  }
+
+  private publish(computing: boolean): void {
+    this.computing = computing;
+    this.snapshot = this.current();
     if (this.disposed) return;
     for (const listener of this.listeners) listener(this.snapshot);
   }
 
   // Observing ----------------------------------------------------------------------
 
-  /** Reads what changed in the store since the last look, into the timeline and the state. */
-  private async observe(): Promise<void> {
-    if (this.disposed) return;
-    const now = this.clock.now();
-    const checkpoint = await this.store.load(EXECUTION);
-    if (checkpoint === null) return;
-
-    // Waits that ended: a waitUntil that ran out, or a wake-up by an event or a timer. A request's reply has its own entry.
-    for (const [id, reported] of this.waits) {
-      if (reported) continue;
-      const wait = await this.store.wait(id);
-      if (wait === null || wait.outcome === null) continue;
-      this.waits.set(id, true);
-      await this.waitEnded(wait, wait.outcome);
-    }
-
-    for (const effect of await this.store.effects(EXECUTION)) {
-      if (this.seenEffects.has(effect.id)) continue;
-      this.seenEffects.add(effect.id);
-      const args = effect.arguments as Record<string, Json>;
-      switch (effect.operation) {
-        case "request.offer": {
-          if ((args.epoch as number) !== 0) break; // A handover's offer; request.released tells it.
-          const info = requestInfo(args.requestId as string, args.holder as string, (args.by as number | null | undefined) ?? null, args.arguments as unknown as EffectJson);
+  /** Tells the team's events since the last look, in order, as timeline entries. */
+  private tell(): void {
+    for (const event of this.team.events.slice(this.told)) {
+      const { at } = event;
+      switch (event.kind) {
+        case "offered": {
+          const info = requestInfo(event.request);
           this.requests.set(info.id, info);
-          this.timeline.push({ kind: "offered", at: now, request: info });
+          this.timeline.push({ kind: "offered", at, request: info });
           break;
         }
-        case "request.released": {
-          const request = this.requests.get(args.requestId as string);
-          if (request === undefined) break;
-          const moved = { ...request, holder: args.nextHolder as string };
-          this.requests.set(request.id, moved);
-          this.timeline.push({ kind: "handedOver", at: now, request: moved, from: args.holder as string, to: args.nextHolder as string });
+        case "handedOver": {
+          const moved = { ...this.requests.get(event.id)!, holder: event.to };
+          this.requests.set(event.id, moved);
+          this.timeline.push({ kind: "handedOver", at, request: moved, from: event.from, to: event.to });
           break;
         }
-        case "request.closed": {
-          const request = this.requests.get(args.requestId as string);
-          if (request === undefined) break;
-          const stored = await this.store.request(request.id);
-          this.timeline.push({ kind: "closed", at: stored?.settledAt ?? now, request: { ...request, holder: args.holder as string }, outcome: args.outcome as unknown as RequestOutcome });
+        case "closed":
+          this.timeline.push({ kind: "closed", at, request: requestInfo(event.request), outcome: event.reply });
+          break;
+        case "said":
+          this.timeline.push({ kind: "said", at, to: event.to, text: event.text });
+          break;
+        case "waiting":
+          this.timeline.push({ kind: "waiting", at, ...this.describe(event) });
+          break;
+        case "waited": {
+          const requested = event.targets.some((target) => target.kind === "request");
+          // A waitUntil that ran out; a wake-up by an event or a timer. A request's reply has its own entry.
+          if (event.value === null) this.timeline.push({ kind: "elapsed", at, targets: this.describe(event).targets, open: requested });
+          else if (!requested) this.timeline.push({ kind: "woke", at, outcome: wakeValue(event.value) });
           break;
         }
-        case "say": {
-          const [to, message] = (args as unknown as EffectJson).args;
-          this.timeline.push({ kind: "said", at: now, to: to === undefined ? "?" : literal(to), text: message?.type === "string" ? message.value : literal(message ?? { type: "unit" }) });
+        case "handlerFailed":
+          this.timeline.push({ kind: "handlerFailed", at, outcome: literal(event.reply) });
           break;
-        }
-        case "execution.handler_failed":
-          this.timeline.push({ kind: "handlerFailed", at: now, outcome: literal(effect.arguments as unknown as Value) });
+        case "ended":
+          this.timeline.push({ kind: "ended", at, status: status(event), ...(event.error === null ? { outcome: literal(event.result!), error: false } : { outcome: event.error, error: true }) });
           break;
       }
     }
-
-    // A wait that started.
-    if (checkpoint.status === "suspended" && checkpoint.waitingFor?.kind === "wait" && !this.waits.has(checkpoint.waitingFor.id)) {
-      const wait = await this.store.wait(checkpoint.waitingFor.id);
-      if (wait !== null) {
-        this.waits.set(wait.id, false);
-        this.timeline.push({ kind: "waiting", at: now, ...(await this.describeWait(wait)) });
-        if (wait.outcome !== null) {
-          this.waits.set(wait.id, true);
-          await this.waitEnded(wait, wait.outcome);
-        }
-      }
-    }
-
-    if (TERMINAL.has(checkpoint.status) && !TERMINAL.has(this.checkpoint?.status ?? "ready")) {
-      this.timeline.push({ kind: "ended", at: now, status: checkpoint.status as "completed" | "failed" | "revoked" | "cancelled", ...finalOutcome(checkpoint) });
-    }
-    this.computing = checkpoint.status === "ready";
-    this.checkpoint = checkpoint;
-    this.snapshot = await this.current();
-    this.notify();
-  }
-
-  private async waitEnded(wait: StoredWait, outcome: WaitOutcome): Promise<void> {
-    if (outcome.tag === "Elapsed") {
-      const open = wait.targets.some((target) => target.kind === "request");
-      this.timeline.push({ kind: "elapsed", at: wait.until ?? this.clock.now(), targets: (await this.describeWait(wait)).targets, open });
-      return;
-    }
-    // A request's reply is told by request.closed.
-    if (outcome.tag === "Reply") return;
-    const now = this.clock.now();
-    const timers = wait.targets.flatMap((target) => (target.kind === "timer" && target.at <= now ? [target.at] : []));
-    const byTimer = timers.length > 0 && !wait.targets.some((target) => target.kind === "event");
-    const value = outcome.value as unknown as Value;
-    this.timeline.push({ kind: "woke", at: byTimer ? Math.min(...timers) : now, outcome: wakeValue(value) });
+    this.told = this.team.events.length;
   }
 
   /**
    * What a wait is for, in words: "for @alice’s answer to “…”", "for the next
    * ciFailed("acme/api") or until 2026-11-08 09:00 UTC", then its deadline.
    */
-  private async describeWait(wait: StoredWait): Promise<{ targets: Run[]; deadline: Run[] }> {
+  private describe(wait: Waiting): { targets: Run[]; deadline: Run[] } {
     const requests: Run[][] = [];
     const events: Run[][] = [];
     const timers: Run[][] = [];
     for (const target of wait.targets) {
       if (target.kind === "request") {
-        const stored = await this.store.request(target.id);
-        const info = this.requests.get(target.id);
-        if (stored === null || info === undefined) continue;
-        const holder = participant(stored.holder);
-        const due: Run[] = stored.by === null ? [] : [", due by ", time(stored.by)];
+        const info = this.requests.get(target.id)!;
+        const holder = participant(info.holder);
+        const due: Run[] = info.by === null ? [] : [", due by ", time(info.by)];
         if (info.name === "judge") requests.push(["for the judge to decide ", quote(info.text), ...due]);
         else if (info.name === "run") requests.push(["for ", holder, " to finish ", quote(info.text), ...due]);
         else requests.push(["for ", holder, "’s answer to ", quote(info.text), ...due]);
       } else if (target.kind === "timer") {
         timers.push(["until ", time(target.at)]);
       } else {
-        const event = JSON.parse(target.key) as Extract<Value, { type: "source" }>;
-        events.push(target.mode === "fact" ? ["for ", code(source(event)), " to hold"] : ["for the next ", code(source(event))]);
+        events.push(target.kind === "fact" ? ["for ", code(source(target.source)), " to hold"] : ["for the next ", code(source(target.source))]);
       }
     }
     const parts = [...requests, ...events, ...timers];
@@ -428,37 +344,21 @@ export class Simulation {
     return { targets, deadline };
   }
 
-  private async current(): Promise<SimulationState> {
-    const checkpoint = this.checkpoint;
-    const now = this.clock.now();
-    const requests: OpenRequest[] = [];
-    let wait: StoredWait | null = null;
-    if (checkpoint?.status === "suspended" && checkpoint.waitingFor?.kind === "wait") wait = await this.store.wait(checkpoint.waitingFor.id);
-    const awaited = new Set(wait?.outcome === null ? wait.targets.flatMap((target) => (target.kind === "request" ? [target.id] : [])) : []);
-    const dues: number[] = [];
-    for (const info of this.requests.values()) {
-      const stored = await this.store.request(info.id);
-      if (stored === null || stored.outcome !== null) continue;
-      requests.push({ ...info, holder: stored.holder, by: stored.by, epoch: stored.epoch, awaited: awaited.has(info.id) });
-      if (stored.by !== null) dues.push(stored.by);
-    }
-    const open = wait !== null && wait.outcome === null ? wait : null;
-    const deadlines = [
-      ...dues,
-      ...(open === null ? [] : [
-        ...(open.until === null ? [] : [open.until]),
-        ...open.targets.flatMap((target) => (target.kind === "timer" ? [target.at] : [])),
-      ]),
-    ].filter((at) => at > now);
-    const waiting = open === null ? null : this.timeline.findLast((entry): entry is Entry & { kind: "waiting" } => entry.kind === "waiting") ?? null;
+  private current(): SimulationState {
+    this.tell();
+    const now = this.team.now;
+    const pass = this.last;
+    const wait = pass?.waiting ?? null;
+    const awaited = new Set(wait?.targets.flatMap((target) => (target.kind === "request" ? [target.id] : [])));
+    const open = this.team.open;
+    const deadlines = [...(pass?.nextDue == null ? [] : [pass.nextDue]), ...open.flatMap((request) => (request.by === null ? [] : [request.by]))].filter((at) => at > now);
     return {
       now,
-      status: checkpoint?.status ?? "ready",
+      status: pass === null ? "ready" : pass.status === "waiting" ? "suspended" : status(pass),
       computing: this.computing,
-      waiting: open === null || waiting === null ? null : { targets: waiting.targets, deadline: waiting.deadline, until: open.until },
-      requests,
-      events: open === null ? [] : open.targets.flatMap((target) =>
-        target.kind === "event" ? [{ source: JSON.parse(target.key) as AwaitedEvent["source"], mode: target.mode }] : []),
+      waiting: wait === null ? null : { ...this.describe(wait), until: wait.until },
+      requests: open.map((request) => ({ ...requestInfo(request), epoch: request.epoch, awaited: awaited.has(request.id) })),
+      events: wait === null ? [] : wait.targets.flatMap((target) => (target.kind === "fact" || target.kind === "stream" ? [{ source: target.source, mode: target.kind }] : [])),
       nextDeadline: deadlines.length === 0 ? null : Math.min(...deadlines),
       timeline: [...this.timeline],
       error: this.error,
@@ -466,25 +366,21 @@ export class Simulation {
   }
 }
 
-/** The JSON of an effect as stored: what the program called, with what. */
-interface EffectJson {
-  name: string;
-  args: Value[];
-  labels: Record<string, Value>;
+function requestInfo(request: LedgerRequest): RequestInfo {
+  return {
+    id: request.id,
+    holder: request.holder,
+    name: request.verb as RequestInfo["name"],
+    text: request.text,
+    options: request.verb === "confirm" ? [variant("Yes"), variant("No")] : request.options,
+    by: request.by,
+  };
 }
 
-function requestInfo(id: string, holder: string, by: number | null, effect: EffectJson): RequestInfo {
-  const name = effect.name as RequestInfo["name"];
-  const said = name === "judge" ? effect.args[0] : effect.args[1];
-  const choices = effect.args[2];
-  return {
-    id,
-    holder,
-    name,
-    text: said?.type === "string" ? said.value : said === undefined ? "" : literal(said),
-    options: name === "choose" && choices?.type === "list" ? choices.values : name === "confirm" ? [variant("Yes"), variant("No")] : null,
-    by,
-  };
+/** How a program ended: a failure whose result is `Revoked` is the loss of the author's authority. */
+function status(ended: { status: "waiting" | "completed" | "failed"; result: Value | null }): "completed" | "failed" | "revoked" {
+  if (ended.status === "waiting") throw new Error("The program has not ended");
+  return ended.status === "failed" && ended.result?.type === "variant" && ended.result.name === "Revoked" ? "revoked" : ended.status;
 }
 
 /** What a wake-up gave, for the timeline: nothing for `()` or a time, and the path an `or` took around the value. */
@@ -492,13 +388,4 @@ function wakeValue(value: Value): string | null {
   let inner = value;
   while (inner.type === "variant" && (inner.name === "First" || inner.name === "Second") && inner.args.length === 1) inner = inner.args[0]!;
   return inner.type === "unit" || inner.type === "time" ? null : literal(value);
-}
-
-/** How the program ended, from its last checkpoint: its value, the reply it failed with, or a program error. */
-function finalOutcome(checkpoint: Checkpoint): { outcome: string; error: boolean } {
-  const control = (checkpoint.snapshot as unknown as { control?: { kind?: string; value?: Value; outcome?: Value; message?: string } }).control;
-  if (control?.kind === "done" && control.value !== undefined) return { outcome: literal(control.value), error: false };
-  if (control?.kind === "failed" && control.outcome !== undefined) return { outcome: literal(control.outcome), error: false };
-  if (control?.kind === "error" && control.message !== undefined) return { outcome: control.message, error: true };
-  return { outcome: checkpoint.status, error: false };
 }

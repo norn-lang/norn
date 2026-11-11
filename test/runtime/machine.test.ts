@@ -3,7 +3,6 @@ import { test } from "node:test";
 import type { AstNode, Expression, FieldsOf, NodeKind, Pattern, Program, Statement, Span } from "../../src/frontend/ast.ts";
 import { compile } from "../../src/runtime/code.ts";
 import { advance, resume, start, type Machine } from "../../src/runtime/machine.ts";
-import { encodeJson, type Json } from "../../src/runtime/persistence.ts";
 import { show, text, unit, variant, type Value } from "../../src/runtime/value.ts";
 
 const span: Span = { start: { line: 1, column: 1, offset: 0 }, end: { line: 1, column: 1, offset: 0 } };
@@ -21,7 +20,7 @@ const lambda = (params: string[], body: Expression) => n("Lambda", { params: par
 const constructor = (name: string, ...args: Expression[]) => n("Constructor", { name, args });
 const bin = (op: "+" | "-" | "==", left: Expression, right: Expression) => n("Binary", { op, left, right });
 const program = (...body: Statement[]): Program => n("Program", { body });
-const snapshot = (machine: Machine) => JSON.parse(encodeJson(machine as unknown as Json)) as Machine;
+const snapshot = (machine: Machine) => JSON.parse(JSON.stringify(machine)) as Machine;
 function done(p: Program): Value {
   const code = compile(p); let machine = start(code);
   do { machine = advance(code, machine); } while (machine.control.kind === "eval" || machine.control.kind === "value");
@@ -44,7 +43,7 @@ test("integers retain arbitrary precision; floating negative zero is serializabl
   assert.deepEqual(done(program(bin("+", int("900719925474099300000"), int(1)))), { type: "int", value: "900719925474099300001" });
   const result = done(program(n("Unary", { op: "-.", operand: n("FloatLiteral", { value: 0 }) })));
   assert.deepEqual(result, { type: "float", value: "-0" });
-  assert.equal(JSON.parse(encodeJson(result as unknown as Json)).value, "-0");
+  assert.equal(JSON.parse(JSON.stringify(result)).value, "-0");
 });
 
 test("labelled defaults evaluate in the function environment and retain argument order", () => {

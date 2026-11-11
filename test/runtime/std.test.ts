@@ -2,126 +2,82 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { test } from "node:test";
-import { parse } from "../../src/frontend/parser.ts";
 import { astToJson } from "../../src/frontend/json.ts";
 import { checkSource } from "../../src/frontend/check/index.ts";
 import { referenceOptions } from "../../src/frontend/check/node.ts";
 import { compile, compileAstJson } from "../../src/runtime/code.ts";
-import { MemoryStore } from "../../src/runtime/memory-store.ts";
-import { SqliteStore } from "../../src/runtime/sqlite-store.ts";
-import { VirtualClock } from "../../src/runtime/clock.ts";
-import { Runtime } from "../../src/runtime/runtime.ts";
-import { SimulatedHost } from "../../src/runtime/simulated-host.ts";
-import { text, variant, type Value } from "../../src/runtime/value.ts";
-import type { DurableStore, StoredRequest } from "../../src/runtime/persistence.ts";
+import { text, type Value } from "../../src/runtime/value.ts";
+import { HOUR, answered, open, reply, started, stream, tree } from "./helpers.ts";
 
-function tree(source: string) {
-  const parsed = parse(source); assert.ok(parsed.ok, JSON.stringify(parsed)); return parsed.program;
-}
 const std = tree(readFileSync(new URL("../../std/std.norn", import.meta.url), "utf8"));
-async function offered(store: DurableStore): Promise<StoredRequest> {
-  for (const effect of await store.effects("p")) {
-    if (effect.operation !== "request.offer") continue;
-    const r = (await store.request((effect.arguments as {requestId: string}).requestId))!;
-    if (r.outcome === null) return r;
-  }
-  throw new Error("No pending request");
-}
+const linked = (contents: string) => compile(tree(contents), { std });
 
-for (const [name, open] of Object.entries({ memory: (c: VirtualClock) => new MemoryStore(c), sqlite: (c: VirtualClock) => new SqliteStore(":memory:", c) })) {
-  test(`${name}: open Std executes the same remind that passed type checking`, async () => {
-    const source = 'open Std\nremind(@alice, "Review this", ~at=1h)';
-    const checked = checkSource(source, referenceOptions()); assert.ok(checked.ok, JSON.stringify(checked.diagnostics));
-    const clock = new VirtualClock(), store = open(clock), host = new SimulatedHost(store, clock);
-    const runtime = new Runtime(compile(checked.program!, {std}), store, host);
-    try {
-      await runtime.create("p"); await host.pump(runtime);
-      assert.deepEqual(await store.effects("p"), []);
-      await host.advanceTo(3_600_000); await host.pump(runtime);
-      const request = await offered(store); assert.equal(request.holder, "@alice");
-      await host.reply(request, variant("Answered", text("reviewed"))); await host.pump(runtime);
-      assert.equal((await store.load("p"))!.status, "completed");
-    } finally { await store.close(); }
-  });
+test("open Std executes the same remind that passed type checking", () => {
+  const checked = checkSource('open Std\nremind(@alice, "Review this", ~at=1h)', referenceOptions());
+  assert.ok(checked.ok, JSON.stringify(checked.diagnostics));
+  const { team } = started(compile(checked.program!, { std }));
+  assert.deepEqual(team.ledger.requests, {});
+  team.advanceTo(HOUR); team.run();
+  const request = open(team);
+  assert.equal(request.holder, "@alice");
+  reply(team, request, answered(text("reviewed")));
+  assert.equal(team.run().status, "completed");
+});
 
-  test(`${name}: Std followUp times out and transfers one request without changing its identity`, async () => {
-    const clock = new VirtualClock(), store = open(clock), host = new SimulatedHost(store, clock);
-    const runtime = new Runtime(compile(tree('open Std\nfollowUp(@codex, "Progress?", ~within=1h, ~escalateTo=@alice)'), {std}), store, host);
-    try {
-      await runtime.create("p"); await host.pump(runtime); const first = await offered(store);
-      await host.advanceTo(3_600_000); await host.pump(runtime); const next = await offered(store);
-      assert.equal(first.id, next.id); assert.equal(next.epoch, 1); assert.equal(next.holder, "@alice");
-      assert.equal(await host.reply(first, variant("Answered", text("obsolete"))), false);
-      await host.reply(next, variant("Answered", text("current"))); await host.pump(runtime);
-      assert.equal((await store.load("p"))!.status, "completed");
-    } finally { await store.close(); }
-  });
-}
+test("Std followUp times out and transfers one request without changing its identity", () => {
+  const { team } = started(linked('open Std\nfollowUp(@codex, "Progress?", ~within=1h, ~escalateTo=@alice)'));
+  const first = open(team);
+  team.advanceTo(HOUR); team.run();
+  const next = open(team);
+  assert.deepEqual([next.id, next.epoch, next.holder], [first.id, 1, "@alice"]);
+  assert.equal(reply(team, first, answered(text("obsolete"))), false);
+  reply(team, next, answered(text("current")));
+  assert.equal(team.run().status, "completed");
+});
 
-test("Std functions have private lexical bindings and repeated open restores the exports", async () => {
-  const clock = new VirtualClock(), store = new MemoryStore(clock), host = new SimulatedHost(store, clock);
-  const source = `
+test("Std functions have private lexical bindings and repeated open restores the exports", () => {
+  const { team, pass } = started(linked(`
     let __norn_Std = 0
     let ask = (who, question) => Answered("wrong ask")
     open Std
     let remind = (who, question, ~at) => Answered("wrong remind")
     open Std
     remind(@alice, "Real ask", ~at=1h)
-  `;
-  const runtime = new Runtime(compile(tree(source), {std}), store, host);
-  try {
-    await runtime.create("p"); await host.pump(runtime);
-    assert.equal((await store.load("p"))!.status, "suspended");
-    await host.advanceTo(3_600_000); await host.pump(runtime);
-    const request = await offered(store);
-    assert.equal((request.arguments as {name: string}).name, "ask");
-  } finally { await store.close(); }
+  `));
+  assert.equal(pass.status, "waiting");
+  team.advanceTo(HOUR); team.run();
+  assert.equal(open(team).verb, "ask");
 });
 
-test("restore pins the original library, even after its source changes", async () => {
+test("a library is linked into the code compiled with it: another library text is another program", () => {
   const program = tree('open Std\nafter(1h)->wait\nhelper()');
-  const oldCode = compile(program, {std: tree('let helper = () => 1')});
-  const newCode = compile(program, {std: tree('let helper = () => 2')});
-  assert.notEqual(oldCode.id, newCode.id);
-  const clock = new VirtualClock(), store = new MemoryStore(clock), host = new SimulatedHost(store, clock);
-  try {
-    await new Runtime(oldCode, store, host).create("p");
-    await host.pump(await Runtime.restore("p", store, host));
-    const restored = await Runtime.restore("p", store, host);
-    await host.advanceTo(3_600_000); await host.pump(restored);
-    assert.deepEqual(((await store.load("p"))!.snapshot as {control: unknown}).control, {kind: "done", value: {type: "int", value: "1"}});
-  } finally { await store.close(); }
+  const results = ["1", "2"].map(value => {
+    const code = compile(program, { std: tree(`let helper = () => ${value}`) });
+    const { team } = started(code);
+    team.advanceTo(HOUR);
+    return { id: code.id, result: team.run().result };
+  });
+  assert.notEqual(results[0].id, results[1].id);
+  assert.deepEqual(results.map(run => run.result), [{ type: "int", value: "1" }, { type: "int", value: "2" }]);
 });
 
-test("unopened code retains its exact hash and trailing opens preserve the final value", async () => {
-  const plain = tree('"中文🙂"'), code = compile(plain, {std});
+test("unopened code retains its exact hash and trailing opens preserve the final value", () => {
+  const plain = tree('"中文🙂"'), code = compile(plain, { std });
   assert.equal(code.ast, astToJson(plain));
   assert.equal(code.id, `sha256:${createHash("sha256").update(astToJson(plain)).digest("hex")}`);
-  const clock = new VirtualClock(), store = new MemoryStore(clock), host = new SimulatedHost(store, clock);
-  try {
-    const runtime = new Runtime(compile(tree('42\nopen Std'), {std}), store, host);
-    await runtime.create("p"); await host.pump(runtime);
-    assert.deepEqual(((await store.load("p"))!.snapshot as {control: unknown}).control, {kind: "done", value: {type: "int", value: "42"}});
-  } finally { await store.close(); }
+  assert.deepEqual(started(linked('42\nopen Std')).pass.result, { type: "int", value: "42" });
   assert.throws(() => compile(tree('open Std\nremind')), /pinned library AST/);
   assert.throws(() => compileAstJson(astToJson(tree('open Std\nremind'))), /unlinked/);
 });
 
-test("generic choose options remain checked at runtime and message payloads use body", async () => {
-  const clock = new VirtualClock(), store = new MemoryStore(clock), host = new SimulatedHost(store, clock);
-  try {
-    for (const [id, options] of [["empty", "[]"], ["number", "[1]"], ["mixed", "[Ship, 1]"]]) {
-      const runtime = new Runtime(compile(tree(`let helper = options => choose(@alice, "Choose", options)\nhelper(${options})->wait`)), store, host);
-      await runtime.create(id); await host.pump(runtime);
-      assert.equal((await store.load(id))!.status, "failed");
-      assert.equal((await store.effects(id)).some(e => e.operation === "request.offer"), false);
-    }
-    const source = 'message(channel"ops")->wait->show';
-    const runtime = new Runtime(compile(tree(source)), store, host);
-    await runtime.create("message"); await host.pump(runtime);
-    const participant: Value = {type: "participant", name: "alice", instance: null, labels: {}};
-    await host.emit("posted", {type: "source", kind: "stream", name: "message", args: [{type: "ref", kind: "channel", value: "ops"}], labels: {}}, {type: "record", fields: {from: participant, body: text("hello")}});
-    await host.pump(runtime);
-    assert.deepEqual(((await store.load("message"))!.snapshot as {control: unknown}).control, {kind: "done", value: text('{from: @alice, body: hello}')});
-  } finally { await store.close(); }
+test("generic choose options remain checked at runtime and message payloads use body", () => {
+  for (const options of ["[]", "[1]", "[Ship, 1]"]) {
+    const { team, pass } = started(`let helper = options => choose(@alice, "Choose", options)\nhelper(${options})->wait`);
+    assert.deepEqual([pass.status, pass.error], ["failed", "choose options must be a nonempty list of constructors"], options);
+    assert.deepEqual(team.ledger.requests, {});
+  }
+  const { team } = started('message(channel"ops")->wait->show');
+  const participant: Value = { type: "participant", name: "alice", instance: null, labels: {} };
+  team.emit(stream("message", { type: "ref", kind: "channel", value: "ops" }), { type: "record", fields: { from: participant, body: text("hello") } });
+  assert.deepEqual(team.run().result, text("{from: @alice, body: hello}"));
 });

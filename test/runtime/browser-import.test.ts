@@ -4,27 +4,24 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
-test("the browser entry runs Std and restores a request without Node imports or globals", () => {
+test("the browser entry runs Std and takes a program up from its ledger without Node imports or globals", () => {
   const std = readFileSync(new URL("../../std/std.norn", import.meta.url), "utf8");
   const bootstrap = `
     import {parse} from "./src/frontend/parser.ts";
-    import {compile, MemoryStore, Runtime, VirtualClock, SimulatedHost, text, variant} from "./src/runtime/browser.ts";
-    const clock = new VirtualClock(), store = new MemoryStore(clock), host = new SimulatedHost(store, clock);
+    import {compile, Team, text} from "./src/runtime/browser.ts";
     const code = compile(parse(${JSON.stringify('open Std\nremind(@alice, "Review", ~at=1h)')}).program, {std: parse(${JSON.stringify(std)}).program});
-    let runtime = new Runtime(code, store, host);
-    await runtime.create("browser"); await host.pump(runtime);
-    await host.advanceTo(3600000); await host.pump(runtime);
-    runtime = await Runtime.restore("browser", store, host);
-    const offer = (await store.effects("browser")).find(e => e.operation === "request.offer");
-    await host.reply(await store.request(offer.arguments.requestId), variant("Answered", text("yes")));
-    await host.pump(runtime);
-    export const result = JSON.stringify({status: (await store.load("browser")).status, process: typeof process, Buffer: typeof Buffer, require: typeof require});
+    let team = new Team(code);
+    team.run(); team.advanceTo(3600000); team.run();
+    team = new Team(code, {now: team.now, ledger: JSON.parse(JSON.stringify(team.ledger))});
+    const [request] = team.open;
+    team.reply(request.id, request.holder, {tag: "Answered", value: text("yes")});
+    export const result = JSON.stringify({status: team.run().status, process: typeof process, Buffer: typeof Buffer, require: typeof require});
   `;
   const script = `
     import {readFileSync} from 'node:fs';
     import {SourceTextModule, createContext} from 'node:vm';
     import ts from 'typescript';
-    const context = createContext({TextEncoder});
+    const context = createContext({TextEncoder, structuredClone});
     const cache = new Map();
     function load(url) {
       if (!cache.has(url)) {
