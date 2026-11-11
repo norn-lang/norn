@@ -166,7 +166,7 @@ function target(summary: Summary, owner: A.Lambda | null, family: Family, argume
   return added;
 }
 
-/** The expressions whose value an expression can have: the branches of if and switch, and the last expression of a block. */
+/** The expressions whose value an expression can have: the branches of if and switch, the last expression of a block, and the members of an anyOf. */
 function values(expression: A.Expression): A.Expression[] {
   const found: A.Expression[] = [];
   const stack: A.Expression[] = [expression];
@@ -182,6 +182,13 @@ function values(expression: A.Expression): A.Expression[] {
       case "Block": {
         const last = node.body.at(-1);
         if (last !== undefined && last.kind !== "Let" && last.kind !== "LetRec") stack.push(last);
+        break;
+      }
+      case "Call": {
+        // A request to a group may go to any of its members.
+        const group = node.callee.kind === "Identifier" && node.callee.name === "anyOf" ? node.args[0] : undefined;
+        if (group?.kind === "ListLiteral") stack.push(...group.elements);
+        else found.push(node);
         break;
       }
       default:

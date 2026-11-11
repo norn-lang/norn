@@ -62,3 +62,8 @@ test("a program with errors has no effects summary", () => {
   assert.equal(result.ok, false);
   assert.equal(result.effects, null);
 });
+
+test("a request to a group targets each of its members", () => {
+  assert.deepEqual(effects(`let review = who => run(who, "Review")->wait
+ignore(review(anyOf([@codex, @grok], ~except=@grok)))`), ["run: @codex @grok", "wait:"]);
+});
