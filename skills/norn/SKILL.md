@@ -44,10 +44,10 @@ handle each of these cases.
 
 | Call | Type and meaning |
 |---|---|
-| `ask(who, question, ~by=?)` | `request<string>`: a free-text answer. |
-| `confirm(who, question, ~by=?)` | `request<yesno>`, with the built-in `type yesno = Yes \| No`. |
-| `choose(who, question, [A, B], ~by=?)` | `request<'a>`: one of the options, constructors of a variant type you declare. |
-| `run(who, task, ~context=?, ~by=?)` | `request<report>`: someone works on a task and reports. |
+| `ask(who, question, ~by=?, ~about=?)` | `request<string>`: a free-text answer. |
+| `confirm(who, question, ~by=?, ~about=?)` | `request<yesno>`, with the built-in `type yesno = Yes \| No`. |
+| `choose(who, question, [A, B], ~by=?, ~about=?)` | `request<'a>`: one of the options, constructors of a variant type you declare. |
+| `run(who, task, ~context=?, ~by=?, ~about=?)` | `request<'a>`: someone works on a task and reports. The report has the type you use it as, such as `Sound \| Flawed(string)`; the holder is told that form. With nothing deciding it, it is the host's `report`. |
 | `judge(condition, ~about=?)` | `request<bool>`: the host's judge decides a condition stated in words. |
 | `r->wait` | `reply<'a>` for a request; the value itself for a fact or a stream. |
 | `r->waitUntil(t)` | `option<reply<'a>>` (or `option<'a>` for a fact or stream). `None`: this wait ran out, and the request stays open. |
@@ -83,6 +83,8 @@ a stable `code`.
 | `not-handled` | A `forEach` handler returns something other than `()` or a reply. | Return the reply (`->wait`), or wrap the call in `ignore`. |
 | `unknown-name`, `unknown-label`, `unknown-constructor` | A name is not bound. | For `remind`, `decide` and the other Std functions, add `open Std`. For a fact or stream, check that the host interface declares it. For a removed name, the message says what replaced it. |
 | `choose-options` | The options of `choose` mix types or are not constructors. | Declare `type choice = A \| B` and pass `[A, B]`. For yes or no, use `confirm`. |
+| `same-request` | Two requests ask the same participant for the same thing. They would be told apart only by their order. | Add `~about=` to each, or word them differently. |
+| `report-form` | A `run`'s report would hold a function, a request, a fact, a stream or a reply. | Report data: text, numbers, lists, records, variants. If the message names a reply, a function uses `?` on the run and returns the bare value: end it with `Answered(value)`. |
 | `not-a-deadline` | `~by` or `waitUntil` is given something other than a time or a duration. | Use `2026-11-07T12:00Z` or `1h`. |
 | `refutable-pattern` | A `let` pattern can fail to match. | Use `switch`. |
 
@@ -90,6 +92,21 @@ In `` `…${x}…` ``, only strings can be interpolated: write `${x->show}`. An
 `if` without `else` must produce `()`.
 
 ## Patterns
+
+**A review between agents.** The report has the type the `switch` uses, so the
+reviewer is asked for exactly `Sound`, or `Flawed` with the reason. No person
+is in the loop; `~about` says which draft each request is about.
+
+```norn
+type verdict = Sound | Flawed(string)
+
+let rec settle = draft =>
+  switch run(@codex, "Find what does not hold in this design", ~about=draft)->wait? {
+  | Sound => Answered(draft)
+  | Flawed(why) => settle(run(@claude, "Revise the design", ~about=draft, ~context=why)->wait?)
+  }
+settle(run(@claude, "Draft the design for request identity")->wait?)
+```
 
 **A decision with a default.** Only the request's own deadline takes the
 recommendation; a refusal is not consent.
@@ -163,6 +180,14 @@ push()?
 ```
 
 ## Habits
+
+- **Do not put a person where an agent can act.** Reviewing, deciding,
+  verifying and taking over failed work are requests like any other, and an
+  agent can hold them. Ask a person when only a person can act: a secret,
+  money, something that cannot be undone, or when they asked to be asked.
+- **Say what a request is about with `~about`.** A request about a new
+  version of a thing is a new request; an answer about the old one does not
+  stand for it.
 
 - **Put defaults that spend money, contact outsiders or cannot be undone in the
   task text,** with the amount and scope, as in "at most US$0.10". Reviewers

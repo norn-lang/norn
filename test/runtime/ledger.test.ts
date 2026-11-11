@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { parse } from "../../src/frontend/parser.ts";
+import { checkSource, elaborate } from "../../src/frontend/check/index.ts";
+import { referenceOptions } from "../../src/frontend/check/node.ts";
 import { compile } from "../../src/runtime/code.ts";
 import { emptyLedger, establish, evaluate, occur, settle, type Ledger, type Reply } from "../../src/runtime/ledger.ts";
 import { text, variant, type Value } from "../../src/runtime/value.ts";
@@ -239,4 +241,29 @@ ask(@alice, "OK?")->wait?
 run(@codex, \`Go: \${early}\`)->wait`), ledger, 2);
   assert.deepEqual(pass.opened.map(r => r.text), ["OK?"]);
   // Hence the rule for the checker: two requests that can be identical must be told apart by ~about or a name.
+});
+
+test("a run's report must have the form the program uses it as, and an earlier holding's answer does not count", () => {
+  const source = `type verdict = Sound | Flawed(string)
+let review = run(@codex, "Find what does not hold")
+switch review->waitUntil(1h) {
+| Some(Answered(Sound)) => say(@claude, "sound")
+| Some(Answered(Flawed(why))) => say(@claude, why)
+| Some(other) => fail(other)
+| None => ignore(review->handOver(@grok)->handOver(@codex)->wait)
+}`;
+  const checked = checkSource(source, referenceOptions());
+  assert.deepEqual(checked.diagnostics, []);
+  const code = compile(elaborate(checked.program!, checked.reports));
+  const ledger = emptyLedger();
+  evaluate(code, ledger, 0);
+  const id = open(ledger)[0].id;
+  assert.equal(ledger.requests[id].form?.text, "verdict");
+  assert.equal(settle(ledger, id, "@codex", answered(report("looks fine")), 1), false);
+  assert.match(ledger.evidence[0].reason, /^The report must be verdict: expected one of Sound, Flawed/);
+  // The request leaves @codex and comes back: an answer given under the first holding is evidence only.
+  evaluate(code, ledger, HOUR);
+  assert.deepEqual([ledger.requests[id].holder, ledger.requests[id].epoch], ["@codex", 2]);
+  assert.equal(settle(ledger, id, "@codex", answered(variant("Sound")), HOUR + 1, 0), false);
+  assert.ok(settle(ledger, id, "@codex", answered(variant("Flawed", text("no owner on failure"))), HOUR + 2, 2));
 });

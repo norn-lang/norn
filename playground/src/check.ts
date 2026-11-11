@@ -4,7 +4,8 @@
  * checked against them. The report is plain data, so it can cross from the
  * worker that checks to the page that shows it.
  */
-import { checkSource, readInterface, readLibrary, type CheckDiagnostic, type EffectSummary } from "../../src/frontend/check/index.ts";
+import type { Span } from "../../src/frontend/ast.ts";
+import { checkSource, readInterface, readLibrary, type CheckDiagnostic, type EffectSummary, type ReportForm } from "../../src/frontend/check/index.ts";
 
 export interface CheckReport {
   ok: boolean;
@@ -14,6 +15,8 @@ export interface CheckReport {
   effects: EffectSummary[] | null;
   /** The types of the program's top-level bindings. */
   bindings: { name: string; type: string }[];
+  /** Where each run is, and the form of its report, for `elaborate`. */
+  reports: { node: { kind: string; span: Span }; form: ReportForm }[];
 }
 
 export type Checker = (source: string) => CheckReport;
@@ -25,8 +28,8 @@ export function createChecker(hostSource: string, stdSource: string): Checker {
   const std = readLibrary(stdSource, "std/std.norn", host);
   if (!std.ok) throw new Error(`the standard library does not check: ${std.diagnostics.map((d) => d.message).join("; ")}`);
   return (source) => {
-    const { ok, diagnostics, effects, bindings } = checkSource(source, { host, std });
-    return { ok, diagnostics, effects, bindings };
+    const { ok, diagnostics, effects, bindings, reports } = checkSource(source, { host, std });
+    return { ok, diagnostics, effects, bindings, reports: reports.map(({ node, form }) => ({ node: { kind: node.kind, span: node.span }, form })) };
   };
 }
 

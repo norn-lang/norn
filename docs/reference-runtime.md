@@ -86,7 +86,11 @@ cap.
 
 ## Requests, facts and streams
 
-- `settle(ledger, id, holder, reply, now)` records a participant's reply. A
+- `settle(ledger, id, holder, reply, now, epoch?)` records a participant's reply.
+  A `run` made by a checked and elaborated program carries the form of its
+  report (docs/types.md §5a), and a report that does not fit is refused. With
+  `epoch`, an answer given under an earlier holding of the request does not
+  count. A
   late answer, an answer from someone who is not the holder and an answer
   outside the request's form settle nothing and are appended to
   `ledger.evidence`. `confirm` takes `Yes`/`No`, `choose` one of its options,

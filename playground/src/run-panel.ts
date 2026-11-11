@@ -3,7 +3,7 @@
  * its end what the program waits for now, with the controls to play the team
  * and the world.
  */
-import { fieldFor, sourceValue, valueOf, type Field, type Host, type HostExternal } from "./host.ts";
+import { fieldFor, fieldForForm, sourceValue, valueOf, type Field, type Host, type HostExternal } from "./host.ts";
 import { el } from "./panels.ts";
 import { fieldInput, type FieldInput } from "./forms.ts";
 import type { Value } from "../../src/runtime/browser.ts";
@@ -163,7 +163,8 @@ export function createRunPanel(elements: RunElements, host: Host): RunPanel {
       }
     } else {
       const report = request.name === "run";
-      const field: Field = report ? fieldFor({ kind: "TypeName", name: "report", args: [], span: SPAN }, host.types) : { kind: "text", type: "string" };
+      const field: Field = request.form !== null ? fieldForForm(request.form.form, request.form.definitions)
+        : report ? fieldFor({ kind: "TypeName", name: "report", args: [], span: SPAN }, host.types) : { kind: "text", type: "string" };
       const input = fieldInput(field, report ? "Report" : "Answer", "", true);
       const form = el("form", { class: "card-answer" }, input.element, el("button", { type: "submit", class: "choice" }, report ? "Finish" : "Answer"));
       form.addEventListener("submit", (event) => {

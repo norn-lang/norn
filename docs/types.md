@@ -171,10 +171,10 @@ returned unchanged.
 
 | Built-in | Type |
 |---|---|
-| `ask` | `(participant, string, ~by: 'd=?) => request<string>` |
-| `confirm` | `(participant, string, ~by: 'd=?) => request<yesno>` |
-| `choose` | `(participant, string, list<'a>, ~by: 'd=?) => request<'a>` |
-| `run` | `(participant, string, ~context: 'c=?, ~by: 'd=?) => request<report>` |
+| `ask` | `(participant, string, ~by: 'd=?, ~about: 'b=?) => request<string>` |
+| `confirm` | `(participant, string, ~by: 'd=?, ~about: 'b=?) => request<yesno>` |
+| `choose` | `(participant, string, list<'a>, ~by: 'd=?, ~about: 'b=?) => request<'a>` |
+| `run` | `(participant, string, ~context: 'c=?, ~by: 'd=?, ~about: 'b=?) => request<'a>` (§5a) |
 | `judge` | `(string, ~about: 'b=?) => request<bool>` |
 | `wait` | `(source<'k, 'w>) => 'w`: `reply<'a>` for a `request<'a>`, `'a` for an `event<'a>` or a `stream<'a>` |
 | `waitUntil` | `(source<'k, 'w>, 'd) => option<'w>` |
@@ -223,7 +223,8 @@ Notes:
     probably a mistake, and one that returns a request has forgotten
     `->wait`. A runtime given unchecked code discards such values.
 - **`report`** is a type the host declares (§7). A host that does not
-  declare it gets an abstract `report`.
+  declare it gets an abstract `report`. It is what a `run` reports where the
+  program does not decide otherwise (§5a).
 - **Removed names** are not part of the language: `request`, `start`,
   `merge`, `outcome`, `Done`, `Declined`, `Failed`, `TimedOut`, the
   `~options` of `ask` and the `~until` of `ask`, `run` and `wait`. Using one
@@ -231,6 +232,45 @@ Notes:
   `unknown-label` error, with a hint that names the replacement, as in
   "`request` was removed: every verb returns a request; use `ask` and
   `->wait`".
+
+## 5a. The form of a report
+
+A `run` reports a value of the type the program uses its report as. Nothing is
+annotated: the `switch` below decides that this run reports a `verdict`.
+
+```norn
+type verdict = Sound | Flawed(string)
+
+switch run(@codex, "Find what does not hold in the design")->wait {
+| Answered(Sound) => say(@claude, "No counterexample found")
+| Answered(Flawed(why)) => say(@claude, why)
+| other => fail(other)
+}
+```
+
+- **The form goes with the request.** `elaborate` writes each call's form
+  into the program, and a host shows it to whoever holds the request: here
+  "`Sound`, or `Flawed` with text". A report that does not fit is refused to
+  the participant, kept as evidence, and leaves the request open, as with
+  `choose` (spec §11.1).
+- **One call, one form.** The report's type of a `run` call is never
+  generalized. A function that makes a run and returns its report has one
+  report type for all its callers; two callers that use it differently are a
+  `type-mismatch`.
+- **Where nothing decides the type**, the report is the host's `report`. So is
+  the report of a `run` passed as a value instead of called, as in
+  `let start = run`: it has no call of its own to read a form from.
+- **What a report can hold:** text, numbers, booleans, times, durations,
+  participants, refs, lists, tuples, records, variants and the host's own
+  types. A function, a request, a fact, a stream or a reply cannot be
+  reported: that is the `report-form` error. A report that would be a reply
+  comes from a function that uses `?` on the run and then returns the bare
+  value; it must end with `Answered(value)`.
+- **A part the program never looks at** is left to the holder, such as the
+  elements of a list that the program only passes on.
+- **A field read decides the type too.** `(run(…)->wait?).text` makes the
+  report the latest declared record type with a `text` field, by the rule for
+  fields (§2).
 
 ## 6. Exhaustiveness
 
@@ -462,6 +502,8 @@ error: this switch does not handle Refused(_) or Revoked at examples/decide.norn
 | `or-pattern-bindings` | error | alternatives of a pattern that bind different names |
 | `later-parameter` | error | a default value that uses a labelled parameter declared after it |
 | `choose-options` | error | options of `choose` that are not constructors of one variant type |
+| `same-request` | error | two requests that ask the same participant for the same thing, with nothing to tell them apart (spec §11.2) |
+| `report-form` | error | a `run` whose report would hold a function, a request, a fact, a stream or a reply |
 | `try-operand` | error | `?` on a value that is not a reply, option or result |
 | `try-return` | error | `?` in a function that returns another family |
 | `non-exhaustive` | error | a `switch` that does not handle every case |

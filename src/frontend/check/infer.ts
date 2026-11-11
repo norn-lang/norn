@@ -19,10 +19,11 @@ import { TypeReader, TypeTable, declareTypes, externalType, type CtorInfo, type 
 import { both, closest, count, either, ordinal, sortDiagnostics, type CheckDiagnostic, type Code } from "./diagnostics.ts";
 import { effectsSummary, type EffectSummary } from "./effects.ts";
 import { analyzeMatch, type Row } from "./exhaustiveness.ts";
+import { formOf, type ReportForm } from "./forms.ts";
 import { binding, type HostInterface, type ValueBinding } from "./interface.ts";
 import {
   GENERIC, Namer, SOURCE, UnifyError, con, fun, generalize, instantiate, isReply, isRequest, newVar, printScheme, printType, resolve, sameShape,
-  substitute, tuple, unify, type Clash, type ClassName, type TFun, type TLabel, type Type,
+  substitute, tuple, unify, type Clash, type ClassName, type TCon, type TFun, type TLabel, type Type,
 } from "./types.ts";
 
 /** The standard library, checked once against a host, as `open Std` brings it in. */
@@ -52,6 +53,8 @@ export interface CheckResult {
   bindings: { name: string; type: string }[];
   /** What the program may do, for review (§8); null when it has errors. */
   effects: EffectSummary[] | null;
+  /** Each direct call of `run` and the form of its report (§5a); empty when the program has errors. */
+  reports: { node: A.Call | A.Pipe; form: ReportForm }[];
 }
 
 /** Checks a program against a host interface and, for `open Std`, the standard library. */
@@ -67,7 +70,7 @@ export function checkProgram(program: A.Program, options: CheckOptions): CheckRe
     } catch (error) {
       if (!isStackExhausted(error)) throw error;
       diagnostics.push({ severity: "error", code: "too-deep", message: STACK_EXHAUSTED, span: program.span });
-      return { ok: false, diagnostics, bindings: [], effects: null };
+      return { ok: false, diagnostics, bindings: [], effects: null, reports: [] };
     }
   }
   return {
@@ -75,6 +78,7 @@ export function checkProgram(program: A.Program, options: CheckOptions): CheckRe
     diagnostics,
     bindings: [...checker.topLevel.values()].map((b) => ({ name: b.name, type: printScheme(b.type) })),
     effects,
+    reports: ok ? checker.reports : [],
   };
 }
 
@@ -198,6 +202,11 @@ export class Checker {
   private readonly lets: { pattern: A.Pattern; bindings: ValueBinding[] }[] = [];
   private readonly patternTypes = new Map<A.Pattern, Type>();
   private readonly chooseOptions: { arg: A.Expression; element: Type }[] = [];
+  /** Each direct call of `run`, with the type of its report (§5a). */
+  private readonly runs: { node: A.Call | A.Pipe; report: Type }[] = [];
+  readonly reports: { node: A.Call | A.Pipe; form: ReportForm }[] = [];
+  /** Each direct request to a participant whose arguments are all literals, by what it asks of whom (spec §11.2). */
+  private readonly literalRequests = new Map<string, A.Call | A.Pipe>();
   /** The program's last expression, if it has one: it must not be a request (§6a). */
   private programValue: { node: A.Expression; type: Type } | null = null;
   /** Errors in patterns so far, to skip the analysis of a match whose patterns are wrong. */
@@ -516,8 +525,13 @@ export class Checker {
         // Participants are compared with their arguments, so these hold no function.
         for (const arg of node.args) this.argument(arg.value, newVar(this.level, null, true), { where: `for ~${arg.label} of a participant` });
         return t.participant;
-      case "Identifier":
-        return this.identifier(node);
+      case "Identifier": {
+        const type = this.identifier(node);
+        // Passed around as a value, `run` has no place of its own to read a form from.
+        const binding = this.resolutions.get(node);
+        if (binding?.origin === "builtin" && node.name === "run") unify(this.reportOf(type), con("report"), this.table);
+        return type;
+      }
       case "Constructor":
         return this.constructor_(node);
       case "TupleLiteral":
@@ -597,6 +611,38 @@ export class Checker {
     return instantiate(entry.type, this.level);
   }
 
+  /**
+   * Two requests that ask the same participant for the same thing are told
+   * apart only by their order of evaluation. An edit that moved one would
+   * give it the other's answer, so the program must tell them apart itself.
+   * Only calls written entirely with literals can be compared here.
+   */
+  private sameRequest(node: A.Call | A.Pipe, name: string, first: A.Expression | null, args: readonly A.Argument[]): void {
+    const asked = [...(first === null ? [] : [first]), ...args.filter((arg) => !(arg.kind === "LabelledArg" && arg.label === "by"))];
+    const pending: unknown[] = [...asked];
+    for (let part = pending.pop(); part !== undefined; part = pending.pop()) {
+      if (Array.isArray(part)) pending.push(...part);
+      else if (typeof part === "object" && part !== null) {
+        if ("kind" in part && !LITERAL_KINDS.has(part.kind as string)) return;
+        for (const [key, child] of Object.entries(part)) if (key !== "span") pending.push(child);
+      }
+    }
+    const key = JSON.stringify([name, asked], (field, value: unknown) => (field === "span" ? undefined : value));
+    const earlier = this.literalRequests.get(key);
+    if (earlier === undefined) { this.literalRequests.set(key, node); return; }
+    this.error(
+      "same-request",
+      `this ${name} asks the same participant for the same thing as the one at ${position(earlier.span)}; identical requests are told apart only by their order, so an edit that moved one would give it the other's answer: say what each is about with ~about, or word them differently`,
+      node.span,
+    );
+  }
+
+  /** The report type of `run`, given the type of one use of it. */
+  private reportOf(run: Type): Type {
+    const request = resolve((resolve(run) as TFun).result) as TCon;
+    return (resolve(request.args[1]!) as TCon).args[0]!;
+  }
+
   private nameHint(name: string): string {
     if (this.defining.includes(name)) {
       return `; a let is not recursive: write let rec ${name} = … to use ${name} in its own definition`;
@@ -634,6 +680,13 @@ export class Checker {
       this.error("not-a-function", `expected a function${name === null ? "" : ` for ${name}`}, found ${found}`, calleeNode.span, { expected: "a function", found });
       for (const arg of args) this.infer(arg.kind === "LabelledArg" ? arg.value : arg);
       return newVar(this.level);
+    }
+    if (name !== null && callee.binding?.origin === "builtin" && ["ask", "confirm", "choose", "run"].includes(name)) this.sameRequest(node, name, first?.expression ?? null, args);
+    if (isBuiltin(callee, "run")) {
+      // One call, one form: the report's type is never generalized, so every use of the enclosing function agrees on it.
+      const report = this.reportOf(shape);
+      unify(report, newVar(0), this.table);
+      this.runs.push({ node, report });
     }
     const positional = args.filter((arg): arg is A.Expression => arg.kind !== "LabelledArg");
     const given = positional.length + (first === null ? 0 : 1);
@@ -1299,6 +1352,20 @@ export class Checker {
         { expected: "list<'a> where 'a is a variant type", found },
       );
     }
+    for (const { node, report } of this.runs) {
+      if (resolve(report).tag === "var") unify(report, con("report"), this.table);
+      const form = formOf(report, this.table);
+      if (typeof form !== "string") { this.reports.push({ node, form }); continue; }
+      const found = printType(resolve(report));
+      this.error(
+        "report-form",
+        form === "a reply"
+          ? `this run would report ${found}: a participant reports a value, never a reply; a function that uses ? on this run must end with Answered(value), not with the bare value`
+          : `this run would report ${found}, which holds ${form}; a report is made of text, numbers, times, participants, lists, tuples, records and variants`,
+        node.span,
+        { found },
+      );
+    }
     for (const match of this.matches) if (!match.broken) this.analyze(match);
     this.drops();
   }
@@ -1411,6 +1478,12 @@ const CLASSES: { readonly [C in ClassName]: { code: Code; name: string; members:
 };
 
 /** Calls, pipes, field accesses, `?`, prefix and binary operators: the inner link of each, or null. */
+/** The node kinds of an expression that is the same value wherever it is written. */
+const LITERAL_KINDS = new Set([
+  "StringLiteral", "IntLiteral", "FloatLiteral", "BoolLiteral", "UnitLiteral", "TimeLiteral", "DurationLiteral", "RefLiteral",
+  "ParticipantLiteral", "Constructor", "TupleLiteral", "ListLiteral", "RecordLiteral", "RecordField", "LabelledArg",
+]);
+
 function spineChild(node: A.Expression): A.Expression | null {
   switch (node.kind) {
     case "Pipe":

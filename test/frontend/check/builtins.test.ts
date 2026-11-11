@@ -41,16 +41,16 @@ test("? mismatches: the operand's family, and the family the function returns", 
   // ? does not wait.
   assert.equal(
     message(`let r = run(@auto, "x")?\nsay(@alice, r.text)`, "try-operand"),
-    "expected a reply, option or result before ?, found request<report>: ? does not wait; wait for the request first, with ->wait?",
+    "expected a reply, option or result before ?, found request<'a>: ? does not wait; wait for the request first, with ->wait?",
   );
   assert.deepEqual(all(`let f = () => {
   let r = run(@auto, "x")->wait?
   r
 }`), [[
-    "type-mismatch",
-    "expected reply<'a> as the result of this function, found report; the ? at 2:11 returns a reply from this function early, so it must return a reply at its end too",
-    3,
-    3,
+    "report-form",
+    "this run would report reply<'a>: a participant reports a value, never a reply; a function that uses ? on this run must end with Answered(value), not with the bare value",
+    2,
+    11,
   ]]);
   assert.equal(
     message("let f = () => {\n  let x = Some(1)?\n  let y = run(@a, \"x\")->wait?\n  None\n}", "try-return"),
@@ -125,7 +125,7 @@ ignore((b, e, g, h, k, m, u))`), {
     z: "'a",
   });
   // Every request verb is an ordinary function, and can be passed as a value.
-  assert.equal(typeOf("let f = ask", "f"), "(participant, string, ~by: 'a=?) => request<string> where 'a: deadline");
+  assert.equal(typeOf("let f = ask", "f"), "(participant, string, ~by: 'a=?, ~about: 'b=?) => request<string> where 'a: deadline");
   assert.equal(typeOf("let w = r => r->wait", "w"), "((event|stream|request)<'a>) => 'a");
 });
 

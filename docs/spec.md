@@ -257,11 +257,13 @@ request's own deadline (§11.1).
 
 | Built-in | Waits? | Meaning |
 |---|---|---|
-| `ask(who, question, ~by=?) : request<string>` | no | Asks a person or an agent a question with a free-text answer. |
-| `confirm(who, question, ~by=?) : request<yesno>` | no | Asks for a yes or a no. |
-| `choose(who, question, [A, B], ~by=?) : request<'a>` | no | Asks for one of the options, which are constructors of one variant type the program declares. |
-| `run(who, task, ~context=?, ~by=?) : request<report>` | no | Starts a run of `who` on `task`, written in natural language. Its answer is the final report; what a `report` contains is host-defined: text, changes made, evidence. |
+| `ask(who, question, ~by=?, ~about=?) : request<string>` | no | Asks a person or an agent a question with a free-text answer. |
+| `confirm(who, question, ~by=?, ~about=?) : request<yesno>` | no | Asks for a yes or a no. |
+| `choose(who, question, [A, B], ~by=?, ~about=?) : request<'a>` | no | Asks for one of the options, which are constructors of one variant type the program declares. |
+| `run(who, task, ~context=?, ~by=?, ~about=?) : request<'a>` | no | Starts a run of `who` on `task`, written in natural language. Its answer is the report. The report has the type the program uses it as: a verdict, a pull request, a list. The host tells the holder that form and refuses a report that does not fit. Where nothing decides the type, it is the host's `report`: text, changes made, evidence. |
 | `judge(condition, ~about=?) : request<bool>` | no | Asks the host's judge whether a condition written in natural language holds. |
+
+`~about` names what a request is about: a pull request, a document, a release, an earlier report. It is part of the request's identity (§9), so a request about a new version of a thing is a new request, and an answer about the old version does not stand for it.
 | `r->wait : reply<'a>` | yes | Waits until the request ends. |
 | `r->waitUntil(t) : option<reply<'a>>` | yes | Waits until the request ends or the time or duration `t` passes, whichever is first. `None` means only that this wait ran out; the request stays open. |
 | `handOver(r, who) : request<'a>` | no | Moves the same request to another participant, with a new epoch (§12). The request keeps its `~by`. |
@@ -641,7 +643,9 @@ program and starting again would ask everyone the same things twice.
 - **Requests that can be identical must be told apart.** If an edit puts a
   request in front of an identical one, the new one takes the old answer. A
   program that can make two identical requests must distinguish them by what
-  they are about or by a name. The checker does not enforce this yet.
+  they are about or by their words. The checker refuses two such requests
+  when both are written with literals (`same-request`); it cannot see two
+  whose texts are computed.
 
 **What this costs.** A pass reads the whole history of its program, and the
 evaluator must give the same result across versions, or upgrades must be
@@ -762,8 +766,9 @@ from projection.
    - (a) Each scope has one authority, and authorities co-operate through
      authenticated messages. This is the current assumption.
    - (b) Waiting programs live on participants' own machines.
-4. **Identity under edits.** How the checker finds requests that can be
-   identical, and how a name for a long-lived request is written.
+4. **Identity under edits.** How the checker finds requests whose computed
+   texts can be identical, and how a name for a long-lived request is
+   written.
 5. **Concrete syntax details.**
    - Time literals.
    - `?` on nested replies.

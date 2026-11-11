@@ -28,6 +28,25 @@ not model calls or tools. Every call to a participant is a *request*. They may
 answer, refuse, not reply in time, try and fail, or lose the authority to act,
 and the language makes a program handle each case.
 
+A person is one kind of participant, never a required step. Drafting,
+reviewing, deciding and verifying can all be requests between agents, and a
+role a person holds today can be given to an agent without changing the
+program.
+
+```rescript
+// Two agents settle a design between themselves. The reviewer is asked for
+// exactly Sound, or Flawed with the reason: a run reports the type the
+// program uses its report as.
+type verdict = Sound | Flawed(string)
+
+let rec settle = draft =>
+  switch run(@codex, "Find what does not hold in this design", ~about=draft)->wait? {
+  | Sound => Answered(draft)
+  | Flawed(why) => settle(run(@claude, "Revise the design", ~about=draft, ~context=why)->wait?)
+  }
+settle(run(@claude, "Draft the design for request identity")->wait?)
+```
+
 ```rescript
 // Ask a person to confirm; if nobody replies by the deadline, the declared default applies.
 switch confirm(@alice, "Ship the billing probe?", ~by=2026-11-07T12:00Z)->wait {

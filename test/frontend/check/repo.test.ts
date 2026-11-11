@@ -52,7 +52,7 @@ test("every norn block in the skill for models type-checks", () => {
 test("the reference host is a valid interface file, and the blocks of docs/types.md check", () => {
   assert.deepEqual(readInterface(read("hosts/reference.norn"), "hosts/reference.norn").diagnostics, []);
   const blocks = codeBlocks(read("docs/types.md"), "norn");
-  assert.equal(blocks.length, 2);
+  assert.equal(blocks.length, 3);
   for (const block of blocks) {
     // A block with an external is an interface; the others are programs.
     const result = /^external /m.test(block) ? readInterface(block, "docs/types.md") : check(block);
