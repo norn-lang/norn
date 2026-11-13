@@ -21,6 +21,12 @@ export interface LedgerRequest {
   candidates: string[] | null;
   epoch: number;
   text: string;
+  /**
+   * What the program asked of whoever takes the request, beyond their name: the
+   * participant's own labels, as in `@auto(~repo="acme/app")`, each as a message
+   * shows it. A host reads them when it chooses or starts the participant.
+   */
+  conditions: Record<string, string>;
   /** What the request is about (`~about`), as a message shows it; null when the program named nothing. */
   about: string | null;
   /** What a `run` was given to work from (`~context`), as a message shows it. */
@@ -194,6 +200,10 @@ export function take(ledger: Ledger, id: string, taker: string, now: number): bo
   request.holder = taker; request.candidates = null; request.epoch++;
   return true;
 }
+function conditionsOf(who: Value | undefined): Record<string, string> {
+  if (who?.type !== "participant" || who.name === "anyOf") return {};
+  return Object.fromEntries(Object.entries(who.labels).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([label, value]) => [label, show(value)]));
+}
 function candidatesOf(who: Value): string[] | null {
   if (who.type !== "participant" || who.name !== "anyOf") return null;
   const except = who.labels.except ? show(who.labels.except) : null;
@@ -308,6 +318,7 @@ export function* slices(code: Code, source: Ledger, now: number, options: PassOp
         if (!permitted()) return revoked();
         request = ledger.requests[id] = {
           id, verb: name, holder, candidates: name === "judge" ? null : candidatesOf(args[0]), epoch: 0, text: question.value,
+          conditions: conditionsOf(args[0]),
           about: labels.about ? show(labels.about) : null, context: labels.context ? show(labels.context) : null,
           options: choices?.type === "list" ? choices.values : null,
           form: labels.form?.type === "string" ? JSON.parse(labels.form.value) as ReportForm : null,
@@ -421,7 +432,7 @@ export function* slices(code: Code, source: Ledger, now: number, options: PassOp
         if (request.reply === null && next === null) close(request, { tag: "Cancelled" }, now);
         else if (request.reply === null) {
           log.push({ kind: "handedOver", id: request.id, from: request.holder, to: next! });
-          request.holder = next!; request.candidates = candidatesOf(args[1]); request.epoch++;
+          request.holder = next!; request.candidates = candidatesOf(args[1]); request.conditions = conditionsOf(args[1]); request.epoch++;
         }
       }
       const at = entry(key, () => ({ at: now, value: null })).at;
