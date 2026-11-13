@@ -122,8 +122,16 @@ cap.
   `never()->waitUntil(t)` still returns `None`.
 - `after` takes a positive duration or an absolute time; `every` a positive
   duration, and with `~from` a time its beat is counted from: the first tick
-  is at that time, or at the next whole period after it once it has passed. `forEach` is sequential and re-arms after each callback; it does
-  not claim a fixed cadence or coalescing.
+  is at that time, or at the next whole period after it once it has passed. `forEach` is sequential and re-arms after each callback: it coalesces what
+  arrived meanwhile and does not claim a fixed cadence.
+- A loop misses no occurrence of a host's stream. The ledger keeps how far
+  the loop has taken each stream (`forEach:<stream>/taken`), and each of the
+  loop's waits goes on from there: what was recorded while the handler
+  worked is one more occurrence, with the latest value, or under `gather`
+  with all of them as a list.
+  `pass.listening` names the host's streams the program's loops take from,
+  whether a loop waits or its handler is at work: a host records an
+  occurrence for a program that listens, not only for one that waits.
 - A loop does not go back over what it has handled. When a `forEach` handler
   finishes an occurrence, the ledger keeps how far every identity had counted
   (`forEach:<stream>/handled`); a later pass begins the loop there. A program

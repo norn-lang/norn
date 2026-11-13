@@ -137,6 +137,10 @@ export function builtinValues(): Builtin[] {
       const a = g();
       return fun([t.stream(a), fun([a], [], t.bool)], [], t.stream(a));
     }],
+    ["gather", null, () => {
+      const a = g();
+      return fun([t.stream(a)], [], t.stream(t.list(a)));
+    }],
     // forEach waits for each occurrence, so it counts as the wait family.
     ["forEach", "wait", () => {
       const a = g();

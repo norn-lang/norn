@@ -194,6 +194,7 @@ returned unchanged.
 | `or` | `(stream<'a>, stream<'b>) => stream<either<'a, 'b>>` |
 | `map` | `(stream<'a>, ('a) => 'b) => stream<'b>` |
 | `filter` | `(stream<'a>, ('a) => bool) => stream<'a>` |
+| `gather` | `(stream<'a>) => stream<list<'a>>` |
 | `forEach` | `(stream<'a>, ('a) => 'h) => 'c`, where `'h` is `handled` |
 
 Notes:

@@ -60,7 +60,7 @@ handle each of these cases.
 | `ignore(x)` | Sets a value aside on purpose; never a request. |
 | `every(d)`, `after(t_or_d)`, `never()` | Timer streams, which give the `time`, and a stream that never fires. `every(d, ~from=t)` counts its beat from the time `t` instead of the program's start. |
 | `a->or(b)` | `stream<either<'a, 'b>>`: either stream, with its value as `First(x)` or `Second(y)`. |
-| `map`, `filter`, `forEach` | Stream functions. `forEach` runs a handler for every occurrence and never returns; the handler returns `()` or a reply. |
+| `map`, `filter`, `gather`, `forEach` | Stream functions. `forEach` runs a handler for every occurrence and never returns; the handler returns `()` or a reply. What arrives while it works is one more round with the latest value; `s->gather` gives all of them as one list. |
 
 `open Std` adds `remind`, `decide`, `followUp`, `schedule`, `digest` and `all`
 (every reply of a list of requests, in order) (see
