@@ -81,3 +81,22 @@ test("generic choose options remain checked at runtime and message payloads use 
   team.emit(stream("message", { type: "ref", kind: "channel", value: "ops" }), { type: "record", fields: { from: participant, body: text("hello") } });
   assert.deepEqual(team.run().result, text("{from: @alice, body: hello}"));
 });
+
+test("Std routine runs a round on its beat, and asks the fallback once when the first does not answer", () => {
+  const DAY = 24 * HOUR;
+  const checked = checkSource(`open Std
+routine(~every=7d, ~from=1970-01-03T00:00Z, ~who=@auto(~repo="acme/app"), ~otherwise=@claude(~repo="acme/app"), "Weekly upkeep")`, referenceOptions());
+  assert.ok(checked.ok, JSON.stringify(checked.diagnostics));
+  const { team } = started(compile(checked.program!, { std }));
+  assert.deepEqual(team.ledger.requests, {});
+  team.advanceTo(2 * DAY); team.run();
+  const first = open(team);
+  assert.deepEqual([first.holder, first.text, first.by], ["@auto", "Weekly upkeep", 2 * DAY + 8 * HOUR]);
+  reply(team, first, { tag: "Refused", reason: "no quota" });
+  team.run();
+  const second = open(team);
+  assert.equal(second.holder, "@claude");
+  reply(team, second, answered({ type: "record", fields: { text: text("done") } } as Value));
+  // The round is over; the next one is a week after the first.
+  assert.equal(team.run().nextDue, 9 * DAY);
+});
