@@ -8,7 +8,7 @@ import { STACK_EXHAUSTED, isStackExhausted } from "../diagnostics.ts";
 import { builtinTable, builtinValues, type Family } from "./builtins.ts";
 import { TypeReader, declareTypes, externalType, typeInfo, type Origin, type TypeTable } from "./declarations.ts";
 import { sortDiagnostics, type CheckDiagnostic } from "./diagnostics.ts";
-import type { Type } from "./types.ts";
+import { FACT, SOURCE, resolve, type Type } from "./types.ts";
 
 /** A name bound to a value: a built-in, an external, a standard library function, or a binding of the program. */
 export interface ValueBinding {
@@ -128,4 +128,21 @@ function describeItem(item: A.TopLevelItem): string {
     default:
       return "an expression";
   }
+}
+
+/**
+ * The facts and streams a host's interface declares, by name: what
+ * `compile(program, { sources })` needs so that a program can wait on them.
+ * An external is one when it is, or returns, an `event` or a `stream`.
+ */
+export function hostSources(host: HostInterface): Record<string, "fact" | "stream"> {
+  const sources: Record<string, "fact" | "stream"> = {};
+  for (const [name, value] of host.values) {
+    if (value.origin !== "host") continue;
+    const declared = resolve(value.type), type = declared.tag === "fun" ? resolve(declared.result) : declared;
+    if (type.tag !== "con" || type.name !== SOURCE) continue;
+    const kind = resolve(type.args[0]);
+    sources[name] = kind.tag === "con" && kind.name === FACT.name ? "fact" : "stream";
+  }
+  return sources;
 }

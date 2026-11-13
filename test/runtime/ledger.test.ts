@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { parse } from "../../src/frontend/parser.ts";
-import { checkSource, elaborate } from "../../src/frontend/check/index.ts";
+import { checkSource, elaborate, hostSources, readInterface } from "../../src/frontend/check/index.ts";
 import { referenceOptions } from "../../src/frontend/check/node.ts";
 import { compile } from "../../src/runtime/code.ts";
 import { emptyLedger, establish, evaluate, occur, settle, stop, take, type Ledger, type Reply } from "../../src/runtime/ledger.ts";
@@ -358,4 +358,26 @@ test("every keeps the program's beat: work between two ticks does not push the n
   settleOpen(4 * HOUR + 30 * 60_000);
   const after = evaluate(code, ledger, 4 * HOUR + 30 * 60_000);
   assert.deepEqual([after.opened.length, after.nextDue], [0, 5 * HOUR]);
+});
+
+test("a program waits on the facts and streams its own host declares", () => {
+  const host = readInterface(`type order
+external paid: (string) => event<order>
+external appEvent: (string, ~feature: string=?) => stream<string>
+external version: string`, "shop.norn");
+  assert.deepEqual(hostSources(host), { paid: "fact", appEvent: "stream" });
+  const checked = checkSource(`appEvent("sentry", ~feature="issue.created")->forEach(what => ask(@claude, what)->wait)`, { host, std: null });
+  assert.deepEqual(checked.diagnostics, []);
+  const code = compile(elaborate(checked.program!, checked.reports), { sources: hostSources(host) });
+  const ledger = emptyLedger();
+  const [target] = evaluate(code, ledger, 0).waiting!.targets;
+  assert.equal(target.kind === "stream" && target.source.type === "source" && target.source.name, "appEvent");
+  occur(ledger, (target as { source: Value }).source, text("Issue APP-1 was created"), 1);
+  evaluate(code, ledger, 1);
+  assert.deepEqual(open(ledger).map(request => request.text), ["Issue APP-1 was created"]);
+  // A name another host supplies is not one of this host's.
+  const other = parse(`ciFailed("acme/app")`), elsewhere = emptyLedger();
+  if (!other.ok) throw new Error("the program parses");
+  evaluate(compile(other.program, { sources: hostSources(host) }), elsewhere, 0);
+  assert.equal(elsewhere.ended?.error, "Unbound name ciFailed");
 });
