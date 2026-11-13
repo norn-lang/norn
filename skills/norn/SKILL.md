@@ -58,7 +58,7 @@ handle each of these cases.
 | `now()`, `show(x)` | The current time; any value rendered as text. |
 | `fail(r)` | Ends the program with a reply other than `Answered`. |
 | `ignore(x)` | Sets a value aside on purpose; never a request. |
-| `every(d)`, `after(t_or_d)`, `never()` | Timer streams, which give the `time`, and a stream that never fires. |
+| `every(d)`, `after(t_or_d)`, `never()` | Timer streams, which give the `time`, and a stream that never fires. `every(d, ~from=t)` counts its beat from the time `t` instead of the program's start. |
 | `a->or(b)` | `stream<either<'a, 'b>>`: either stream, with its value as `First(x)` or `Second(y)`. |
 | `map`, `filter`, `forEach` | Stream functions. `forEach` runs a handler for every occurrence and never returns; the handler returns `()` or a reply. |
 

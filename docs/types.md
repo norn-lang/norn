@@ -188,7 +188,7 @@ returned unchanged.
 | `show` | `('a) => string` |
 | `fail` | `(reply<'a>) => 'b` |
 | `ignore` | `('a) => unit`, where `'a` is `ignorable` |
-| `every` | `(duration) => stream<time>` |
+| `every` | `(duration, ~from: time=?) => stream<time>` |
 | `after` | `('d) => stream<time>` |
 | `never` | `() => stream<'a>` |
 | `or` | `(stream<'a>, stream<'b>) => stream<either<'a, 'b>>` |

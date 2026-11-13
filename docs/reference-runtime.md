@@ -121,7 +121,8 @@ cap.
   it in every pass that reads it. `never()` never occurs, and
   `never()->waitUntil(t)` still returns `None`.
 - `after` takes a positive duration or an absolute time; `every` a positive
-  duration. `forEach` is sequential and re-arms after each callback; it does
+  duration, and with `~from` a time its beat is counted from: the first tick
+  is at that time, or at the next whole period after it once it has passed. `forEach` is sequential and re-arms after each callback; it does
   not claim a fixed cadence or coalescing.
 - A loop does not go back over what it has handled. When a `forEach` handler
   finishes an occurrence, the ledger keeps how far every identity had counted
