@@ -381,3 +381,27 @@ external version: string`, "shop.norn");
   evaluate(compile(other.program, { sources: hostSources(host) }), elsewhere, 0);
   assert.equal(elsewhere.ended?.error, "Unbound name ciFailed");
 });
+
+test("a loop does not go back over the occurrences it has handled, whatever its text becomes", () => {
+  const daily = (task: string) => program(`every(1h)->forEach(_ => run(@claude, "${task}")->wait)`);
+  const ledger = emptyLedger();
+  let code = daily("audit");
+  evaluate(code, ledger, 0);
+  for (let hour = 1; hour <= 3; hour++) {
+    evaluate(code, ledger, hour * HOUR);
+    const [asked] = open(ledger);
+    assert.ok(settle(ledger, asked.id, "@claude", answered(report("done")), hour * HOUR + 1));
+    evaluate(code, ledger, hour * HOUR + 2);
+  }
+  assert.equal(Object.keys(ledger.requests).length, 3);
+  // The task is reworded between two rounds: nothing is asked until the next beat, and then once.
+  code = daily("audit, and read the changelog");
+  const reworded = evaluate(code, ledger, 3 * HOUR + 3);
+  assert.deepEqual([reworded.status, reworded.opened.length, reworded.nextDue], ["waiting", 0, 4 * HOUR]);
+  assert.deepEqual(evaluate(code, ledger, 4 * HOUR).opened.map(request => request.text), ["audit, and read the changelog"]);
+  // Reworded while a round is out: the round is asked in the new words, and the old request is no longer the program's.
+  code = daily("audit only");
+  const during = evaluate(code, ledger, 4 * HOUR + 1);
+  assert.deepEqual([during.opened.map(request => request.text), during.unreached.map(request => request.text)],
+    [["audit only"], ["audit, and read the changelog"]]);
+});
