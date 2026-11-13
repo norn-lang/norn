@@ -181,7 +181,7 @@ test("a standing duty re-arms from the ledger and reports a failed round to its 
   settle(ledger, open(ledger)[0].id, "@auto", { tag: "Broke", reason: "no quota" }, DAY + 5);
   const pass = evaluate(code, ledger, DAY + 5);
   assert.equal(pass.status, "waiting");
-  assert.equal(pass.nextDue, 2 * DAY + 5);
+  assert.equal(pass.nextDue, 2 * DAY);
   assert.equal(Object.keys(ledger.entries).filter(k => k.startsWith("report:")).length, 1);
 });
 
@@ -342,4 +342,20 @@ test("a request carries the conditions the program put on its participant", () =
   const [request] = evaluate(code, emptyLedger(), 0).opened;
   assert.deepEqual([request.holder, request.conditions], ["@auto", { effort: "high", repo: "acme/app" }]);
   assert.deepEqual(evaluate(program(`ask(@alice, "Ship it?")->wait`), emptyLedger(), 0).opened[0].conditions, {});
+});
+
+test("every keeps the program's beat: work between two ticks does not push the next one back, and missed ticks are not made up", () => {
+  const code = program(`every(1h)->forEach(_ => run(@auto, "Sweep")->wait)`);
+  const ledger = emptyLedger(0);
+  const settleOpen = (at: number) => { for (const r of open(ledger)) settle(ledger, r.id, r.holder, answered(report("done")), at); };
+  evaluate(code, ledger, 0);
+  assert.equal(evaluate(code, ledger, HOUR).opened.length, 1);
+  // The sweep takes twenty minutes: the next tick is still on the hour.
+  settleOpen(HOUR + 20 * 60_000);
+  assert.equal(evaluate(code, ledger, HOUR + 20 * 60_000).nextDue, 2 * HOUR);
+  assert.equal(evaluate(code, ledger, 2 * HOUR).opened.length, 1);
+  // This one takes two and a half hours: the ticks at three and four are gone, and five is next.
+  settleOpen(4 * HOUR + 30 * 60_000);
+  const after = evaluate(code, ledger, 4 * HOUR + 30 * 60_000);
+  assert.deepEqual([after.opened.length, after.nextDue], [0, 5 * HOUR]);
 });
