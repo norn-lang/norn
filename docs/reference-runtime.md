@@ -182,6 +182,11 @@ them without changing the library's own. A program compiled with another
 library text is another program. The runtime never reads a file or fetches a
 dependency by itself; a program with an unlinked `open Std` is refused.
 
+`compile(program, {sources})` names the facts and streams the program's host
+supplies, so that a call of one gives a source the program can wait on:
+`hostSources(host)` reads them from the host's interface file. Without it a
+program may wait on the reference host's sources only.
+
 ## Try a simulated request
 
 From the repository root, with Node 24 and `npm ci` already run:

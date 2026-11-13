@@ -18,5 +18,5 @@ export type { EffectSummary } from "./effects.ts";
 export { elaborate } from "./elaborate.ts";
 export type { Form, FormDefinition, ReportForm } from "./forms.ts";
 export { checkProgram, loadLibrary, type CheckOptions, type CheckResult, type Library } from "./infer.ts";
-export { builtinInterface, loadInterface, type HostInterface, type ValueBinding } from "./interface.ts";
+export { builtinInterface, hostSources, loadInterface, type HostInterface, type ValueBinding } from "./interface.ts";
 export { checkSource, readInterface, readLibrary, type SourceCheck } from "./source.ts";
