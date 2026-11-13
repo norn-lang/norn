@@ -79,7 +79,7 @@ stores its result in `ledger.ended` and ends every request it left open
 
 **Program errors.** Division by zero, an unbound name, an unknown label, a
 malformed `choose`, a non-positive timer, `fail(Answered(x))` and stream
-`map`/`filter` (not implemented) end the program as a program failure with
+`filter` (not implemented) end the program as a program failure with
 the error's text. They never become `Broke`. Any other exception is the
 runtime's own and propagates.
 
@@ -116,7 +116,9 @@ cap.
 - `r->waitUntil(t)` leaves the request open when its own deadline comes
   first; `status(r)` stays `None` until the request ends. `handOver` keeps the
   request's identity and `~by` and raises its epoch. `or` keeps the winning
-  value in `First` or `Second` through nesting. `never()` never occurs, and
+  value in `First` or `Second` through nesting. `map` occurs when its stream
+  does: the ledger records the stream's own value, and the function runs on
+  it in every pass that reads it. `never()` never occurs, and
   `never()->waitUntil(t)` still returns `None`.
 - `after` takes a positive duration or an absolute time; `every` a positive
   duration. `forEach` is sequential and re-arms after each callback; it does
