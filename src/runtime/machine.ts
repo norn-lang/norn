@@ -42,7 +42,7 @@ export interface Machine {
   resumedAt: number;
 }
 const effectBuiltins = new Set(["ask", "confirm", "choose", "run", "wait", "waitUntil", "cancel", "handOver", "status", "say", "judge", "first"]);
-const builtins = new Set([...effectBuiltins, "now", "show", "ignore", "fail", "or", "never", "map", "filter", "forEach", "anyOf"]);
+const builtins = new Set([...effectBuiltins, "now", "show", "ignore", "fail", "or", "never", "map", "filter", "gather", "forEach", "anyOf"]);
 
 export function start(code: Code, now = 0): Machine {
   return { control: { kind: "eval", node: code.root, env: "e0" }, frames: [],
@@ -243,6 +243,10 @@ function builtin(code: Code, machine: Machine, name: string, args: Value[], labe
     }
     case "map": case "filter": {
       if (args.length !== 2 || args[0].type !== "source" || args[0].kind !== "stream" || !["closure", "builtin"].includes(args[1].type)) throw new Error(`${name} needs a stream and function`);
+      value = { type: "source", kind: "stream", name, args, labels }; break;
+    }
+    case "gather": {
+      if (args.length !== 1 || Object.keys(labels).length || args[0].type !== "source" || args[0].kind !== "stream") throw new Error("gather needs one stream");
       value = { type: "source", kind: "stream", name, args, labels }; break;
     }
     case "forEach": {

@@ -348,14 +348,21 @@ Streams compose:
   Nesting keeps every value: `a->or(b)->or(c)` gives
   `either<either<'a, 'b>, 'c>`.
 - `map` and `filter` transform and select occurrences.
+- `s->gather : stream<list<'a>>` occurs when `s` does, with every occurrence
+  of `s` that has arrived and is not yet taken, oldest first. A loop that
+  gathers is handed each of what arrived while it worked, not only the
+  latest: `every(1d)->or(ciFailed("acme/api")->gather)->forEach(…)`.
 - `never()` is a stream with no occurrences.
 - `forEach` handles every occurrence until the program ends. Its handler
   returns `()` or a `reply`. `Answered(_)` or `()` takes the next occurrence;
   any other reply is reported to the author, and the loop goes on. To end the
-  program, the handler calls `fail`. A `forEach` declares what happens when
-  occurrences arrive while the previous one is still being handled: run them
-  one after another, coalesce them, or run them concurrently. The default is
-  to coalesce.
+  program, the handler calls `fail`. What arrives while
+  the previous occurrence is still being handled is not lost and does not
+  pile up: the default is to coalesce. When the handler has finished, the
+  loop handles once more, with the latest value, or under `gather` with all
+  of them. A timer's ticks that passed are not made up. Running them one
+  after another or concurrently is declared on the `forEach`; the reference
+  runtime implements neither yet.
 
 An occurrence caused by the program's own effects never wakes that same
 program. That is the guard against loops, and it needs no count limit.

@@ -424,3 +424,49 @@ test("every counts its beat from the time it is given: the first tick is at that
     assert.match(evaluate(program(source), failed, 0).error ?? "", /A timer needs one positional argument/);
   }
 });
+
+test("a loop misses no occurrence: what occurs while its handler works is one more round, and gather takes them all", () => {
+  const failed = (repo: string): Value => ({ type: "source", kind: "stream", name: "ciFailed", args: [text(repo)], labels: {} });
+  const round = (ledger: Ledger) => { const [asked] = open(ledger); settle(ledger, asked.id, asked.holder, answered(report("done")), 0); };
+  // Coalesced: two more failures arrive while the first is handled; they are one more round, with the latest.
+  const each = program(`ciFailed("acme/api")->forEach(what => run(@auto, what)->wait)`);
+  const ledger = emptyLedger();
+  evaluate(each, ledger, 0);
+  occur(ledger, failed("acme/api"), text("first"), 1);
+  const working = evaluate(each, ledger, 1);
+  assert.deepEqual([open(ledger).map(request => request.text), working.listening.map(stream => stream.name)], [["first"], ["ciFailed"]]);
+  occur(ledger, failed("acme/api"), text("second"), 2);
+  occur(ledger, failed("acme/api"), text("third"), 3);
+  round(ledger); evaluate(each, ledger, 4);
+  assert.deepEqual(open(ledger).map(request => request.text), ["third"]);
+  round(ledger);
+  assert.deepEqual([evaluate(each, ledger, 5).status, open(ledger).length, Object.keys(ledger.requests).length], ["waiting", 0, 2]);
+
+  // All of them: under gather the failures that arrived while a round ran are one occurrence carrying each, beside the beat.
+  const together = program(`every(1h)->or(ciFailed("acme/api")->gather)->forEach(why => run(@auto, show(why))->wait)`);
+  const batch = emptyLedger();
+  evaluate(together, batch, 0);
+  occur(batch, failed("acme/api"), text("first"), 1);
+  evaluate(together, batch, 1);
+  occur(batch, failed("acme/api"), text("second"), 2);
+  occur(batch, failed("acme/api"), text("third"), 3);
+  round(batch); evaluate(together, batch, 4);
+  assert.deepEqual(Object.values(batch.requests).map(request => request.text), ["Second([first])", "Second([second, third])"]);
+  round(batch);
+  // Nothing is left of them: the next round is the beat's.
+  assert.equal(evaluate(together, batch, 5).nextDue, HOUR);
+  // Two repositories are taken apart: gathering one does not pass over what the other still holds.
+  const two = program(`ciFailed("acme/api")->gather->or(ciFailed("acme/web")->gather)->forEach(why => run(@auto, show(why))->wait)`);
+  const both = emptyLedger();
+  evaluate(two, both, 0);
+  occur(both, failed("acme/api"), text("a1"), 1);
+  evaluate(two, both, 1);
+  occur(both, failed("acme/web"), text("w1"), 2);
+  occur(both, failed("acme/api"), text("a2"), 3);
+  round(both); evaluate(two, both, 4);
+  round(both); evaluate(two, both, 5);
+  assert.deepEqual(Object.values(both.requests).map(request => request.text), ["First([a1])", "Second([w1])", "First([a2])"]);
+  // gather takes a stream of the host, not one the program composed.
+  const composed = emptyLedger();
+  assert.match(evaluate(program(`every(1h)->gather->wait`), composed, 0).error ?? "", /gather takes a stream of the host/);
+});
