@@ -319,8 +319,11 @@ the language.
   fact and registers the wait as one step, so a change cannot slip between
   observing "false" and starting to wait.
 - **`stream<'a>` is occurrences that keep happening.** Examples:
-  - `every(d)`, and `after(t)`, which happens once, at a time or after a
-    duration from now; both give the `time` they fired
+  - `every(d)`, whose ticks fall every `d` from when the program started:
+    work between two ticks does not push the next one back, and ticks that
+    passed while the program was busy are not made up
+  - `after(t)`, which happens once, at a time or after a duration from now;
+    both give the `time` they fired
   - `ciFailed("owner/repo")`
   - `prActivity("owner/repo#n")`
   - `docChanged(ref)`

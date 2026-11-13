@@ -247,7 +247,13 @@ function targetsOf(ledger: Ledger, waited: Value, began: number): Target[] {
       if (source.args.length !== 1 || Object.keys(source.labels).length) throw new ProgramError("A timer needs one positional argument");
       const when = source.args[0];
       if (!(source.name === "after" && when.type === "time") && (when.type !== "duration" || BigInt(when.value) <= 0n)) throw new ProgramError("A relative timer needs a positive duration");
-      targets.push({ kind: "timer", at: instant(when, began)!, path });
+      // `after` counts from when the wait began. `every` keeps the program's beat: its ticks fall a whole number
+      // of periods after the program started, so work between two waits does not push the next tick back, and
+      // ticks that passed while it worked are not made up.
+      const period = source.name === "every" ? Number(when.value) : 0;
+      const at = period > 0 ? ledger.startedAt + (Math.floor((began - ledger.startedAt) / period) + 1) * period : instant(when, began)!;
+      if (!Number.isSafeInteger(at)) throw new ProgramError("A deadline lies outside the clock's range");
+      targets.push({ kind: "timer", at, path });
     } else if (source.name !== "never") targets.push({ kind: source.kind, source, path });
   }
   return targets;
