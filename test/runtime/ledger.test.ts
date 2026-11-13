@@ -405,3 +405,22 @@ test("a loop does not go back over the occurrences it has handled, whatever its 
   assert.deepEqual([during.opened.map(request => request.text), during.unreached.map(request => request.text)],
     [["audit only"], ["audit, and read the changelog"]]);
 });
+
+test("every counts its beat from the time it is given: the first tick is at that time, and later ones a whole period after", () => {
+  const DAY = 24 * HOUR, monday = Date.UTC(2026, 10, 16, 9);
+  const code = program(`every(7d, ~from=2026-11-16T09:00Z)->forEach(_ => run(@auto, "Weekly round")->wait)`);
+  // Started on the Friday before: the first round is on Monday at nine, not a week after the start.
+  const started = monday - 3 * DAY + 5 * HOUR, ledger = emptyLedger(started);
+  assert.equal(evaluate(code, ledger, started).nextDue, monday);
+  assert.equal(evaluate(code, ledger, monday).opened.length, 1);
+  for (const r of open(ledger)) settle(ledger, r.id, r.holder, answered(report("done")), monday + HOUR);
+  assert.equal(evaluate(code, ledger, monday + HOUR).nextDue, monday + 7 * DAY);
+  // Started after the time it names: the beat keeps that time of the week.
+  const late = emptyLedger(monday + 2 * DAY);
+  assert.equal(evaluate(code, late, monday + 2 * DAY).nextDue, monday + 7 * DAY);
+  // ~from is a time, and only every takes it.
+  for (const source of ["every(1d, ~from=1h)->wait", "after(1h, ~from=2026-11-16T09:00Z)->wait"]) {
+    const failed = emptyLedger();
+    assert.match(evaluate(program(source), failed, 0).error ?? "", /A timer needs one positional argument/);
+  }
+});

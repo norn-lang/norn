@@ -120,7 +120,7 @@ export function builtinValues(): Builtin[] {
     // A reply may be set aside on purpose; a request may not (§6a).
     ["ignore", null, () => fun([newVar(GENERIC, null, false, null, true)], [], t.unit)],
     ["fail", null, () => fun([t.reply(g())], [], g())],
-    ["every", null, () => fun([t.duration], [], t.stream(t.time))],
+    ["every", null, () => fun([t.duration], [optional("from", t.time)], t.stream(t.time))],
     ["after", null, () => fun([g("deadline")], [], t.stream(t.time))],
     ["never", null, () => fun([], [], t.stream(g()))],
     ["or", null, () => {

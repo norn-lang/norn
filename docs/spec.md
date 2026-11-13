@@ -322,6 +322,9 @@ the language.
   - `every(d)`, whose ticks fall every `d` from when the program started:
     work between two ticks does not push the next one back, and ticks that
     passed while the program was busy are not made up
+  - `every(d, ~from=t)`, the same beat counted from the time `t`: the first
+    tick is at `t`, as in `every(7d, ~from=2026-11-16T09:00Z)` for every
+    Monday at nine
   - `after(t)`, which happens once, at a time or after a duration from now;
     both give the `time` they fired
   - `ciFailed("owner/repo")`
