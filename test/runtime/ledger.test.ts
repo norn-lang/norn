@@ -336,3 +336,10 @@ test("a program stopped from outside ends failed and cancels what it left open",
   assert.equal(settle(ledger, request.id, "@alice", { tag: "Answered", value: text("yes") }, 7), false);
   assert.deepEqual(stop(ledger, 8, "again"), []);
 });
+
+test("a request carries the conditions the program put on its participant", () => {
+  const code = program(`run(@auto(~repo="acme/app", ~effort="high"), "Audit the day's merges")->wait`);
+  const [request] = evaluate(code, emptyLedger(), 0).opened;
+  assert.deepEqual([request.holder, request.conditions], ["@auto", { effort: "high", repo: "acme/app" }]);
+  assert.deepEqual(evaluate(program(`ask(@alice, "Ship it?")->wait`), emptyLedger(), 0).opened[0].conditions, {});
+});
