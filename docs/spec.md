@@ -406,6 +406,16 @@ let followUp = (who, text, ~within, ~escalateTo) => {
 let schedule = (~every as period, ~on=never(), task) =>
   every(period)->or(on)->forEach(_ => run(@auto, task)->wait)
 
+// Work that repeats: a round every period counted from a time, and at once
+// when `on` occurs. `who` does it; when that does not end in an answer,
+// `otherwise` is asked the same once, and a round that still fails is reported.
+let routine = (~every as period, ~from, ~on=never(), ~who=@auto, ~otherwise, ~by=8h, task) =>
+  every(period, ~from)->or(on)->forEach(_ =>
+    switch run(who, task, ~by)->wait {
+    | Answered(report) => Answered(report)
+    | _ => run(otherwise, task, ~by)->wait
+    })
+
 let digest = (who, ~every as period) =>
   schedule(~every=period, `Tell ${who->show} what changed since they last looked; say nothing if nothing changed`)
 
@@ -422,7 +432,7 @@ let rec all = requests =>
 
 Common features of agent products reduce to these functions:
 
-- cron-like schedules → `schedule`;
+- cron-like schedules → `schedule`, or `routine` when the round has a time of the week and someone to fall back on;
 - event triggers → `schedule(~on=…)` or `forEach`;
 - reminders → `remind`;
 - "waiting for your reply" → `ask(…)->wait`;

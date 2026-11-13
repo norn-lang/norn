@@ -8,7 +8,7 @@ The syntax is ReScript. Participants are values like `@alice`; a request's own d
 
 - [Skill: writing Norn](https://raw.githubusercontent.com/norn-lang/norn/main/skills/norn/SKILL.md): the model, the built-ins, the checker's diagnostic codes and how to fix them, and six patterns
 - [Examples](https://github.com/norn-lang/norn/tree/main/examples): a decision with a default, a follow-up with a handover, a release chain, a standing duty, and a "keep going until done" loop
-- [Standard library](https://raw.githubusercontent.com/norn-lang/norn/main/std/std.norn): `remind`, `decide`, `followUp`, `schedule` and `digest`, written in Norn
+- [Standard library](https://raw.githubusercontent.com/norn-lang/norn/main/std/std.norn): `remind`, `decide`, `followUp`, `schedule`, `routine` and `digest`, written in Norn
 - [Reference host interface](https://raw.githubusercontent.com/norn-lang/norn/main/hosts/reference.norn): the facts, streams and types that programs can use with the reference host
 
 ## Reference
