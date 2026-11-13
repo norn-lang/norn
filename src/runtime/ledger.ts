@@ -368,6 +368,16 @@ export function* slices(code: Code, source: Ledger, now: number, options: PassOp
       return { value: { type: "request", id }, at: request.openedAt };
     }
 
+    if (effect.loop) {
+      // A loop's handled occurrences are behind it. Where its handler last finished, the ledger keeps how far
+      // every identity had counted; a later pass begins the loop from there and evaluates none of them again,
+      // so a long-running program stays cheap to evaluate and a change to its text asks nothing over.
+      const handled = `forEach:${sha256(eventKey(args[0])).slice(0, 16)}/handled`;
+      if (effect.loop === "continues") ledger.entries[handled] = { at: now, value: Object.fromEntries(seen) };
+      else for (const [kind, count] of Object.entries((ledger.entries[handled]?.value ?? {}) as Record<string, number>)) {
+        seen.set(kind, Math.max(seen.get(kind) ?? 0, count));
+      }
+    }
     if (name === "wait" || name === "waitUntil") {
       if (args.length !== (name === "waitUntil" ? 2 : 1)) throw new ProgramError(`${name} needs a target${name === "waitUntil" ? " and a positional deadline" : ""}`);
       const key = identity("wait", { target: args[0], until: args[1] ?? null });

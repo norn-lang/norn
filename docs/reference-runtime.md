@@ -123,6 +123,11 @@ cap.
 - `after` takes a positive duration or an absolute time; `every` a positive
   duration. `forEach` is sequential and re-arms after each callback; it does
   not claim a fixed cadence or coalescing.
+- A loop does not go back over what it has handled. When a `forEach` handler
+  finishes an occurrence, the ledger keeps how far every identity had counted
+  (`forEach:<stream>/handled`); a later pass begins the loop there. A program
+  that has run for a year evaluates only its current occurrence, and a change
+  to its text asks nothing again for the occurrences behind it.
 
 ## Authority
 
