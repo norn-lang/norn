@@ -20,6 +20,9 @@ handle each of these cases.
   text), `confirm` (yes or no), `choose` (one of your options), `run` (a task)
   and `judge` (does a condition hold). Every verb returns a handle,
   `request<'a>`, at once. Nothing waits until you write `->wait`.
+  Whoever holds a request can delegate it to someone who answers for them;
+  the program does not see it and needs no code for it. To move a request
+  yourself, use `handOver`.
 - **Replies.** A request ends in one of six replies, each naming who acted
   and why:
   `reply<'a> = Answered('a) | Refused(string) | NoReply | Broke(string) | Cancelled | Revoked`.
@@ -202,6 +205,10 @@ switch all(parts) {
   verifying and taking over failed work are requests like any other, and an
   agent can hold them. Ask a person when only a person can act: a secret,
   money, something that cannot be undone, or when they asked to be asked.
+- **Ask a question its holder can decide from the question alone:** what you
+  recommend, what each answer leads to, and whether it can be undone. They
+  may delegate it to someone who knows more, and that one starts from the
+  same words.
 - **Say what a request is about with `~about`.** A request about a new
   version of a thing is a new request; an answer about the old one does not
   stand for it.
