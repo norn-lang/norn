@@ -53,6 +53,13 @@ export function tell(entry: Entry): Line {
     }
     case "handedOver":
       return line(["Handed the request over from ", participant(entry.from), " to ", participant(entry.to)], "reach");
+    // The program does not see these: a participant changed who answers.
+    case "delegated":
+      return line([participant(entry.from), " delegated the request to ", participant(entry.to), ...because(entry.reason)], "reach");
+    case "returned":
+      return line([participant(entry.from), " gave the request back to ", participant(entry.to), ...because(entry.reason)], "quiet");
+    case "reclaimed":
+      return line([participant(entry.to), " took the request back from ", participant(entry.from)], "quiet");
     case "closed":
       return closed(entry.request, entry.outcome, line);
     case "said":
@@ -107,6 +114,9 @@ function closed(request: RequestInfo, outcome: Extract<Entry, { kind: "closed" }
       return line(["The request to ", who ?? holder, " was revoked"], "bad");
   }
 }
+
+/** Why a participant changed who holds a request, in their words, when they gave any. */
+const because = (reason: string | null): Run[] => (reason ? [": ", quote(reason)] : []);
 
 /** Words that end a sentence: a full stop, unless they already end in one, or in a quoted question or exclamation. */
 export function sentence(words: readonly Run[]): Run[] {

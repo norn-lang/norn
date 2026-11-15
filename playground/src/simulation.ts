@@ -1,7 +1,7 @@
 /**
  * A program running against a simulated team, in the page. The visitor plays
- * the team: answers, refuses or breaks requests, moves the virtual clock and
- * fires the host's facts and streams. This module drives the ledger runtime
+ * the team: answers, refuses or breaks requests, delegates them and takes
+ * them back, moves the virtual clock and fires the host's facts and streams. This module drives the ledger runtime
  * (`src/runtime/browser.ts`) and keeps what happened as a timeline of plain
  * data; it knows nothing of the page.
  *
@@ -37,11 +37,15 @@ export interface RequestInfo {
   form: ReportForm | null;
   /** The request's own deadline (`~by`), on the ledger's clock: past it, the request ends `NoReply`. */
   by: number | null;
+  /** Who delegated it to its holder, who answers it for them; null when nobody did. */
+  delegatedBy: string | null;
 }
 
 export type Entry =
   | { kind: "offered"; at: number; request: RequestInfo }
   | { kind: "handedOver"; at: number; request: RequestInfo; from: string; to: string }
+  /** A participant changed who holds a request: delegated it, gave it back, or took it back. The program does not see it. */
+  | { kind: "delegated" | "returned" | "reclaimed"; at: number; request: RequestInfo; from: string; to: string; reason: string | null }
   | { kind: "closed"; at: number; request: RequestInfo; outcome: Reply }
   /** An answer outside the request's form, such as an option it did not offer: kept as evidence, and the request stays open. */
   | { kind: "rejected"; at: number; request: RequestInfo; answer: string; reason: string }
@@ -169,13 +173,33 @@ export class Simulation {
     return this.reply(requestId, { tag: "Broke", reason });
   }
 
+  /** Delegates a request as its holder to `to`, who answers it for them. Null once delegated, or why it cannot be. */
+  delegate(requestId: string, to: string, reason: string): Promise<string | null> {
+    return this.act(() => {
+      const request = this.team.ledger.requests[requestId];
+      if (request === undefined || request.reply !== null) return "The request has already ended";
+      return this.team.delegate(requestId, request.holder, to, reason || undefined);
+    });
+  }
+
+  /** Takes a delegated request back, as whoever delegated it. Null once it is back, or why it cannot be. */
+  reclaim(requestId: string): Promise<string | null> {
+    return this.act(() => {
+      const request = this.team.ledger.requests[requestId];
+      if (request === undefined || request.reply !== null) return "The request has already ended";
+      return this.team.reclaim(requestId, request.delegatedBy ?? "");
+    });
+  }
+
   private reply(requestId: string, reply: Reply): Promise<boolean> {
     return this.act(() => {
       const request = this.team.ledger.requests[requestId];
       if (request === undefined || request.reply !== null) return false;
       // The visitor answers a request offered to a group as the first of the group, who takes it.
+      const evidence = this.team.ledger.evidence.length;
       const accepted = this.team.reply(requestId, request.candidates?.[0] ?? request.holder, reply);
-      if (!accepted) {
+      // A delegate's refusal is no rejected answer: the request went back to whoever delegated it.
+      if (!accepted && this.team.ledger.evidence.length > evidence) {
         const answer = reply.tag === "Answered" ? literal(reply.value) : reply.tag;
         this.timeline.push({ kind: "rejected", at: this.team.now, request: requestInfo(request), answer, reason: this.team.ledger.evidence.at(-1)!.reason });
       }
@@ -288,9 +312,17 @@ export class Simulation {
           break;
         }
         case "handedOver": {
-          const moved = { ...this.requests.get(event.id)!, holder: event.to };
+          const moved = { ...this.requests.get(event.id)!, holder: event.to, delegatedBy: null };
           this.requests.set(event.id, moved);
           this.timeline.push({ kind: "handedOver", at, request: moved, from: event.from, to: event.to });
+          break;
+        }
+        case "delegated":
+        case "returned":
+        case "reclaimed": {
+          const moved = requestInfo(event.request);
+          this.requests.set(moved.id, moved);
+          this.timeline.push({ kind: event.kind, at, request: moved, from: event.from, to: event.to, reason: event.reason });
           break;
         }
         case "closed":
@@ -379,6 +411,7 @@ function requestInfo(request: LedgerRequest): RequestInfo {
     options: request.verb === "confirm" ? [variant("Yes"), variant("No")] : request.options,
     form: request.form,
     by: request.by,
+    delegatedBy: request.delegatedBy ?? null,
   };
 }
 
