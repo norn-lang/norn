@@ -1,6 +1,6 @@
 # Norn
 
-> Norn is the coordination language for teams of people and AI agents. A Norn program asks, waits, decides and hands work over. Every request verb (ask, confirm, choose, run, judge) returns a request that the program waits on with ->wait; it ends in a reply (Answered, Refused, NoReply, Broke, Cancelled or Revoked), and the type checker makes the program handle each one and never drop a request. Status: a design draft with a local reference implementation (parser, type checker, durable evaluator, simulated host). No production host runs it yet.
+> Norn is the coordination language for teams of people and AI agents. A Norn program asks, waits, decides and hands work over. Every request verb (ask, confirm, choose, run, judge) returns a request that the program waits on with ->wait; it ends in a reply (Answered, Refused, NoReply, Broke, Cancelled or Revoked), and the type checker makes the program handle each one and never drop a request. Status: a design draft with a local reference implementation (parser, type checker, durable evaluator, simulated host). xMatrix (https://xmatrix.sh) is the first host: a program in a code block tagged `norn run` on an xMatrix page runs against a real team.
 
 The syntax is ReScript. Participants are values like `@alice`; a request's own deadline is `~by=1h` or a time, and `->waitUntil(1h)` stops only the wait; facts and streams come from the host. Check a program with `norn check --json file.norn`.
 
