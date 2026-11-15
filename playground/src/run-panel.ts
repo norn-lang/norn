@@ -141,6 +141,7 @@ export function createRunPanel(elements: RunElements, host: Host): RunPanel {
 
     const who: Run[] =
       request.name === "judge" ? ["The judge decides this. Decide as the judge."]
+      : request.delegatedBy !== null ? [{ kind: "participant", text: request.holder }, " answers this for ", { kind: "participant", text: request.delegatedBy }, ", who delegated it. Answer as them."]
       : request.name === "run" ? [{ kind: "participant", text: request.holder }, " has this task. Finish it as them."]
       : [{ kind: "participant", text: request.holder }, " is asked. Answer as them."];
     const due: Run[] = request.by === null ? [] : [" With no reply by ", { kind: "time", text: formatTime(request.by) }, ", it ends as no reply."];
@@ -177,13 +178,45 @@ export function createRunPanel(elements: RunElements, host: Host): RunPanel {
     }
 
     const refusals = el("span", { class: "card-refusals" });
-    // Any request can be refused, or broken: tried, and not done.
-    for (const [label, verb] of [["Refuse…", "refuse"], ["Broke…", "broke"]] as const) {
+    // Any request can be refused, or broken: tried, and not done. A delegate's refusal gives it back instead, and
+    // whoever delegated it can take it back; the holder the program asked can delegate it, but not a judgement.
+    const delegated = request.delegatedBy !== null;
+    for (const [label, verb] of (delegated ? [["Give back…", "refuse"]] : [["Refuse…", "refuse"], ["Broke…", "broke"]]) as [string, "refuse" | "broke"][]) {
       const button = el("button", { type: "button", class: "quiet-button" }, label);
       button.addEventListener("click", () => openReason(verb));
       refusals.append(button);
     }
+    if (!delegated && request.name !== "judge") {
+      const button = el("button", { type: "button", class: "quiet-button" }, "Delegate…");
+      button.addEventListener("click", () => openDelegate());
+      refusals.append(button);
+    }
+    if (delegated) {
+      const button = el("button", { type: "button", class: "quiet-button" }, "Take back");
+      button.addEventListener("click", () => busy(() => simulation!.reclaim(request.id)));
+      refusals.append(button);
+    }
     actions.append(refusals);
+
+    const openDelegate = () => {
+      const to = el("input", { type: "text", "aria-label": "Who answers it", placeholder: "Who answers it? @claude:2", autocomplete: "off" });
+      const why = el("input", { type: "text", "aria-label": "Why", placeholder: "Why? (optional)", autocomplete: "off" });
+      reason.replaceChildren(to, why,
+        el("button", { type: "submit", class: "choice" }, "Delegate"),
+        el("button", { type: "button", class: "quiet-button", "data-cancel": "" }, "Cancel"));
+      reason.hidden = false;
+      reason.querySelector("[data-cancel]")!.addEventListener("click", () => (reason.hidden = true));
+      reason.onsubmit = (event) => {
+        event.preventDefault();
+        const named = to.value.trim();
+        if (named === "") return problem(reason, "Name who answers it, as in @claude:2");
+        busy(async () => {
+          const refusal = await simulation!.delegate(request.id, named.startsWith("@") ? named : `@${named}`, why.value.trim());
+          if (refusal !== null) problem(reason, refusal);
+        });
+      };
+      to.focus();
+    };
 
     const openReason = (verb: "refuse" | "broke") => {
       const input = el("input", { type: "text", "aria-label": verb === "refuse" ? "Why refuse" : "What went wrong", placeholder: verb === "refuse" ? "Why refuse?" : "What went wrong?", autocomplete: "off" });

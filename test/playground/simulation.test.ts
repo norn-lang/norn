@@ -90,6 +90,36 @@ test("an answer, a refusal and a broken request each take their own branch", asy
   declined.dispose();
 });
 
+test("a holder delegates a request; the delegate gives it back, and the program sees none of it", async () => {
+  const simulation = await start(`switch confirm(@daniel, "Clean up the expired commands?")->wait {
+| Answered(Yes) => "clean"
+| other => fail(other)
+}`);
+  const id = simulation.state.requests[0]!.id;
+  assert.equal(await simulation.delegate(id, "@claude:2", "You read the code"), null);
+  assert.deepEqual(simulation.state.requests.map((request) => [request.holder, request.delegatedBy]), [["@claude:2", "@daniel"]]);
+  assert.equal(waiting(simulation), "Waiting for @claude:2’s answer to “Clean up the expired commands?”");
+  // A delegate's refusal ends nothing: the request is the delegator's again.
+  await simulation.refuse(id, "Not mine to judge");
+  assert.deepEqual([simulation.state.status, simulation.state.requests.map((request) => [request.holder, request.delegatedBy])],
+    ["suspended", [["@daniel", null]]]);
+  assert.equal(await simulation.delegate(id, "@claude:2", ""), null);
+  assert.equal(await simulation.delegate(id, "@grok", ""), "A delegate answers the request or gives it back; they cannot delegate it again");
+  assert.equal(await simulation.reclaim(id), null);
+  await simulation.answer(id, variant("Yes"));
+  assert.equal(simulation.state.status, "completed");
+  assert.deepEqual(story(simulation), [
+    "09:00 Asked @daniel to confirm “Clean up the expired commands?”",
+    "09:00 Waiting for @daniel’s answer to “Clean up the expired commands?”",
+    "09:00 @daniel delegated the request to @claude:2: “You read the code”",
+    "09:00 @claude:2 gave the request back to @daniel: “Not mine to judge”",
+    "09:00 @daniel delegated the request to @claude:2",
+    "09:00 @daniel took the request back from @claude:2",
+    "09:00 @daniel answered Yes",
+    "09:00 Completed with \"clean\"",
+  ]);
+});
+
 test("follow-up.norn hands the same request over after an hour, and posts the answer", async () => {
   const simulation = await start(read("examples/follow-up.norn"));
   const first = simulation.state.requests[0]!;
