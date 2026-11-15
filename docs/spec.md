@@ -1,10 +1,11 @@
 # Norn language spec (draft v0)
 
-> Status: design draft, 2026-11-06, revised 2026-11-07 and 2026-11-11, open to
-> change. The request and reply model was redesigned for clarity: see
-> [Changes from the first draft](#15-changes-from-the-first-draft). The
-> durable state became a ledger of requests instead of a stored program
-> state: see [The ledger](#16-the-ledger-2026-11-11). A local reference
+> Status: design draft, 2026-11-06, revised 2026-11-07, 2026-11-11 and
+> 2026-11-15, open to change. The request and reply model was redesigned for
+> clarity: see [Changes from the first draft](#15-changes-from-the-first-draft).
+> The durable state became a ledger of requests instead of a stored program
+> state: see [The ledger](#16-the-ledger-2026-11-11). Whoever holds a request
+> can delegate it: see [Delegation](#17-delegation-2026-11-15). A local reference
 > implementation (a parser, an evaluator over the ledger and a simulated
 > team) runs the five §3 examples from source
 > ([reference runtime](reference-runtime.md)). [xMatrix](https://xmatrix.sh) is the
@@ -187,10 +188,10 @@ and why, and means one thing only:
 
 | Case | Who acted | Meaning |
 |---|---|---|
-| `Answered(x)` | the participant | They answered, and `x` is the answer. |
-| `Refused(why)` | the participant | They explicitly declined. |
+| `Answered(x)` | the holder | The participant asked answered, or someone they delegated the request to answered for them (§7); `x` is the answer. |
+| `Refused(why)` | the participant asked | They explicitly declined. A delegate's refusal gives the request back instead (§7). |
 | `NoReply` | the clock | The request's own `~by` deadline passed with no answer. Only a request made with `~by` can end this way, and the store's clock decides it (§11.1). |
-| `Broke(why)` | the participant | They tried, and could not do it. |
+| `Broke(why)` | the participant asked | They tried, and could not do it. A delegate's report gives the request back instead (§7). |
 | `Cancelled` | the program | We called the request off, with `cancel`, or by ending the program (§11.1). |
 | `Revoked` | the authority | The authority behind the request was lost (§10). |
 
@@ -268,7 +269,7 @@ request's own deadline (§11.1).
 | `r->waitUntil(t) : option<reply<'a>>` | yes | Waits until the request ends or the time or duration `t` passes, whichever is first. `None` means only that this wait ran out; the request stays open. |
 | `anyOf([a, b], ~except=?) : participant` | no | A group as one participant. A request to it is offered to all of them; whoever takes it first holds it, and nobody else does. `~except` leaves one out, as in "the reviewer is not the author". |
 | `first([r1, r2]) : (request<'a>, reply<'a>)` | yes | Waits for the first of several requests to end, and gives that request with its reply. The others stay open. |
-| `handOver(r, who) : request<'a>` | no | Moves the same request to another participant, with a new epoch (§12). The request keeps its `~by`. |
+| `handOver(r, who) : request<'a>` | no | Moves the same request to another participant, with a new epoch (§12). The request keeps its `~by`. The program hands a request over; the participant it asked delegates one (§7). |
 | `cancel(r) : unit` | no | Calls the request off. It ends `Cancelled` unless it has already ended. |
 | `status(r) : option<reply<'a>>` | no | Looks at the request without waiting: `None` while it is open. |
 | `say(to, text) : unit` | no | Posts a message to a participant or a `ref`. |
@@ -382,6 +383,28 @@ a Page section or a message.
   and its `~by` deadline. They can answer it, refuse it, or report that they
   could not do it. A message such as an ETA is a message: it does not move the
   deadline, which belongs to the program text.
+- **The participant being asked can delegate it** to one participant, who
+  answers it for them: a person who cannot judge a question passes it to an
+  agent who can, or an agent passes to its person a decision it should not
+  make. The participant asked is the one the program named, handed the
+  request over to, or who took it from a group.
+  - It stays the same request, with the same question, form and `~by`, under
+    a new epoch (§12). The program does not see it: a reply carries no name,
+    so a delegated request looks to the program like one whose holder asked
+    someone and passed the answer on, which a holder could always do. What
+    changes is the record: the ledger says who answered, and for whom.
+  - Only the holder delegates, and only once: the delegate answers, or gives
+    the request back. A delegate's `Refused` or `Broke` gives it back to
+    whoever delegated it and ends nothing, because only the participant asked
+    can decline the request or fail it (§4.1). Whoever delegated it can take
+    it back while it is open, and then answer it themselves.
+  - A request is never delegated to a participant it leaves out, such as the
+    `~except` of the group it was offered to, which holds after one of the
+    group has taken it. The host admits a delegation only when the program's
+    author may ask that participant and the participant may see the request
+    (§10). The judge's judgements are not delegated.
+  - The program stays in charge: its `handOver` or `cancel` ends a delegation,
+    and the request's deadline passes as it would have.
 - **Shared functions live in a standard library** written in Norn and opened
   with `open Std`.
 
@@ -465,9 +488,11 @@ stores nothing of its own: no stack, no snapshot, no position.
   `status` read saw and what was said are ledger entries. A later pass
   therefore takes the same path, and a crash, a restart or a second worker is
   only another pass.
-- **Identity.** A request is the same request when it asks the same holder
-  for the same thing: verb, participant, text and labels other than `~by`.
-  Identical requests are told apart by their order of evaluation.
+- **Identity.** A request is the same request when the program asks the same
+  participant for the same thing: verb, participant as the program names it,
+  text and labels other than `~by`. Who holds it now, after a handover or a
+  delegation, is not part of it. Identical requests are told apart by their
+  order of evaluation.
 - **Waiting is not a primitive.** It is what an open request looks like from
   the side of whoever asked.
 
@@ -489,6 +514,9 @@ program makes. §11.2 gives the rules for changing a program while it runs.
   references to credentials, never credentials themselves.
 - **Naming is not granting.** Passing `@alice` to another program does not let
   that program act as Alice.
+- **Delegating is not granting.** A delegate gives the request's answer and
+  nothing else: they act with none of the delegator's other authority, and
+  the program still performs every effect as its author.
 - **Failures surface.** A program's result is a reply to its author. A
   program that ends without success is reported to its author as a request,
   and a failure is never silence. It ends without success when:
@@ -569,6 +597,14 @@ it.
   the store's clock, never of when a worker looked.
 - **`handOver` keeps the request.** Same identity, same `~by`, a new epoch. The
   previous holder is told it was released.
+- **Delegation keeps the request.** Same identity, same `~by`, same form, a
+  new epoch, and an entry in the ledger with who delegated it, to whom, when
+  and why. A delegate's `Answered` settles it; their `Refused` or `Broke`
+  settles nothing and returns it to whoever delegated it, under a new epoch.
+  An answer from someone whose holding has passed, the delegator's while it
+  is delegated or the delegate's after it came back, is evidence. A
+  delegation to a participant the request leaves out is refused. `handOver`
+  ends a delegation.
 - **`cancel(r)`** ends an open request `Cancelled` and tells its holder. On a
   request that has already ended it does nothing; the earlier reply stands.
 - **Ending a program cancels its open requests.** However the program ends,
@@ -597,8 +633,9 @@ it.
   and an occurrence recorded before a crash is delivered after it once, with
   the same value and path.
 
-**Contract cases.** The redesign of §15 adds these cases to the conformance
-suite. Each states the input history and the one allowed result.
+**Contract cases.** The redesign of §15 adds cases 1 to 6 to the conformance
+suite, and delegation (§17) adds cases 7 to 12. Each states the input history
+and the one allowed result.
 
 1. **A deadline passes with no scan.** A request with `~by=1h`; the store's
    clock reaches 1h and nothing runs; then the holder answers. The answer is
@@ -628,6 +665,31 @@ suite. Each states the input history and the one allowed result.
    again, and nothing is cancelled. A process restart is the same pass over
    the ledger's JSON. Checkpoints and stores written by the stored-state
    runtime before 2026-11-11 are not read by anything; no migration exists.
+7. **A delegate answers.** `confirm(@daniel, q)`; `@daniel` delegates it to
+   `@claude:2`; then `@daniel` answers, then `@claude:2` does. `@daniel`'s
+   answer is evidence and `@claude:2`'s settles the request. The ledger names
+   `@claude:2` as the holder who answered and `@daniel` as the one they
+   answered for, and the program's pass is the same as if `@daniel` had
+   answered.
+8. **The delegator takes it back.** After the delegation of case 7, `@daniel`
+   takes the request back; then `@claude:2` answers under its delegated
+   holding. The answer is evidence, and `@daniel`'s own answer settles the
+   request.
+9. **A delegate gives it back.** After the delegation of case 7, `@claude:2`
+   refuses, or reports that it could not do it. Nothing is settled and
+   nothing is evidence: the request is open with `@daniel` under a new epoch,
+   with its `~by` unchanged. Only `@daniel`'s own refusal ends it `Refused`.
+10. **The program hands a delegated request over.** `q` is held by `@daniel`
+    and delegated to `@claude:2`; then `q->handOver(@alice)`. The delegation
+    ends: `@claude:2`'s answer is evidence, `@daniel` cannot take the request
+    back, and `@alice`'s answer settles it.
+11. **An exception outlives a take.** `run(anyOf([@claude, @grok, @codex],
+    ~except=@codex), task)`; `@grok` takes it. A delegation to `@codex` or
+    `@codex:3` is refused; one to `@claude` is not.
+12. **The deadline passes while a request is delegated.**
+    `confirm(@daniel, q, ~by=1h)`, delegated to `@claude:2`; the store's
+    clock reaches 1h; then `@claude:2` answers. The answer is evidence, and
+    the reply is `NoReply` at 1h.
 
 **Conformance cases.** The reference runtime has local checks for the cases
 marked ✓, against its ledger and simulated team. The reference runtime
@@ -643,7 +705,8 @@ host-independent suite that every host runs is still to be written.
 - a crash between recording an intent and dispatching it;
 - a crash between dispatch and receipt;
 - ✓ a reply racing a deadline; a deleted source is not checked yet;
-- ✓ the six contract cases of §11.1, with nested `or` through a disk restart;
+- ✓ the twelve contract cases of §11.1, with nested `or` and a delegation
+  through a disk restart;
 - cancellation while an agent is already running;
 - ✓ permission withdrawn while waiting;
 - ✓ an edited program keeps the requests it still makes, and a change of
@@ -729,7 +792,7 @@ requests.**
   - a declared default;
   - the winner of an `any`;
   - `cancel`;
-  - `handOver`.
+  - `handOver`, and a delegation.
 
   This is not an exhaustive list or a proof that the whole runtime is
   coordination-free. Admission, current permissions, revocation and resource
@@ -749,13 +812,15 @@ requests.**
    creator's turn does not end the program's scope or its reminders. Leaving
    the logical scope withdraws authority and requests cancellation; it does
    not prove that an external participant has stopped or undo prior effects.
-2. **Handover is delegation plus fencing.**
-   - `handOver(r, who)` keeps the same request and increases its epoch.
+2. **A change of holder is fenced.**
+   - `handOver(r, who)`, made by the program, and a delegation, made by the
+     holder (§7), keep the same request and increase its epoch.
    - A resolution or capability that carries an old epoch is refused.
    - The previous holder is told it was released.
-3. **Reply and delegation notices are durable.** A reply creates
-   a durable notification intent for affected participants. Handover creates
-   a delegation-change notice; it does not terminate the request. Delivery
+3. **Reply and holder-change notices are durable.** A reply creates
+   a durable notification intent for affected participants. A handover or a
+   delegation creates a notice of the change of holder, and a delegation is
+   also told to the program's author; neither ends the request. Delivery
    respects current access and availability. Failed or suppressed delivery is
    visible to the responsible owner rather than counted as delivered; the
    protocol cannot guarantee that an offline person has read a notice.
@@ -808,6 +873,10 @@ from projection.
    - Time literals.
    - `?` on nested replies.
    - Which `forEach` policy is the default.
+6. **Standing delegation.** Whether a participant can delegate a kind of
+   request in advance, such as every `confirm` about clearing expired data,
+   whether a delegate may delegate again, and whether a program needs a way to
+   say that one request must be answered by the participant it asks.
 
 ## 14. Non-goals
 
@@ -859,3 +928,31 @@ Three things changed.
 The reference runtime's stored-state driver and its stores were removed once
 the playground and the contract suite ran on the ledger runtime
 (`src/runtime/ledger.ts`).
+
+## 17. Delegation (2026-11-15)
+
+An agent asked Daniel to confirm a cleanup of production data. He could not
+judge it, asked another agent, and wanted that agent's answer to count. Only he
+could answer the card, so the agent decided in the conversation and did the
+work while the request stayed open, and the request's declared default would
+have recorded the opposite when its deadline passed. Until then only the
+program could move a request; the participant asked could answer it, refuse
+it or report that they could not do it.
+
+| Before | Now | Why |
+|---|---|---|
+| Only the program changed who holds a request: `handOver`, or a take from `anyOf` | The holder can delegate it once; the delegate answers or gives it back, and the delegator can take it back (§7) | Whom to ask is the asker's choice, but who answers for me is mine. Without it, a person who cannot judge a question clicks what someone else decided, and the ledger records a consent they never formed, or the work goes around the request |
+| `Answered`, `Refused` and `Broke` all named the participant asked | `Answered` names the holder, who may be a delegate answering for the participant asked; `Refused` and `Broke` remain the participant asked's alone (§4.1) | A refusal or a failure is attributed to whoever the program asked, never to a stand-in |
+| `~except` was applied only when one of a group took the request | The exception is kept on the request, and no delegation reaches it | Delegation must not undo a separation of duties the program stated |
+| §12 called `handOver` delegation | `handOver` is the asker's move; delegation is the holder's | One word, one meaning (§15) |
+
+**What it leaves sound.** The change adds no syntax and no type. A reply
+carries no name, so a program cannot tell a delegate's answer from its
+holder's, and the replies a program can receive are the ones it could receive
+before: a holder could always ask someone and pass the answer on. A request's
+identity names the participant the program asked, not whoever holds it, so
+every pass finds a delegated request again and opens nothing twice. A
+delegation is the same fenced change of holder as a handover or a take, so a
+request still has one holder and ends with one reply, and its `~by` and form
+do not change. What changes is the record: the ledger now says that a
+delegate answered, and for whom.

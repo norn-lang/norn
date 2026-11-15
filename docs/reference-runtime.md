@@ -40,9 +40,10 @@ stored.
 answers each effect from the ledger, and stops at the first wait whose result
 is not recorded yet. Where the program makes a request the ledger holds, it
 gets that request back; where it makes one the ledger lacks, the request is
-opened. A request's identity is a digest of its verb, holder, arguments and
-labels other than `~by`, with its ordinal among identical requests in
-evaluation order. When a wait began, how it ended, what was said, what a
+opened. A request's identity is a digest of its verb, the participant as the
+program names it, its arguments and labels other than `~by`, with its ordinal
+among identical requests in evaluation order; who holds it now is not part
+of it. When a wait began, how it ended, what was said, what a
 `status` read saw and which `forEach` handler failure was reported are ledger
 entries, so a later pass takes the same path.
 
@@ -108,7 +109,23 @@ cap.
   worker looked. A `~by` already reached when the request is recorded ends it
   at once.
 - `take(ledger, id, taker, now)` gives a request offered with `anyOf` to one of
-  its group; an answer from one of the group takes it in the same step.
+  its group; an answer from one of the group takes it in the same step. The
+  group's `~except` stays on the request as `excluded`.
+- `delegate(ledger, id, from, to, now, {epoch, reason})` lets the holder pass
+  an open request to one participant, `@alice` or `@codex:2`, who answers it
+  for them (spec §7). The request keeps its identity, `~by` and form, takes a
+  new epoch, and records the delegator in `delegatedBy`. It returns null, or
+  why it cannot: the request has ended, `from` does not hold it, it is
+  delegated already, nobody of its group has taken it, it is a judgement, or
+  `to` is not a single participant, is `from` itself, or is one the request
+  leaves out.
+  `reclaim(ledger, id, by, now)` gives it back to whoever delegated it. A
+  delegate's `Refused` or `Broke` passed to `settle` ends nothing: the request
+  goes back to the delegator under a new epoch, and `settle` returns false
+  with no evidence. Every delegation, every request given back and every one
+  taken back is appended to `ledger.delegations`, with its reason. `handOver`
+  ends a delegation. A ledger written before delegation existed lacks these
+  fields and is read as one in which nobody delegated anything.
 - `establish` records a fact, which then holds; `occur` records one stream
   occurrence. Both refuse timers, `never()` and compositions. A wait on a fact
   that already holds ends at once. A wait on a stream takes the first
@@ -153,7 +170,9 @@ about again.
   open end `Cancelled`.
 
 Leaving `authorize` out means the host vouches for the whole pass. A real
-transport must still check permissions again when it delivers.
+transport must still check permissions again when it delivers. A delegation
+is not a program's effect and no pass sees it: a host admits one only when
+the author may still ask the delegate and the delegate may see the request.
 
 ## The simulated team
 
@@ -164,9 +183,14 @@ agent or contacts a service.
   reaches; `reply(id, holder, reply)` answers as a participant;
   `emit(source, value)` makes a fact hold or a stream occur; `run()` is one
   pass, and `slices()` the same pass in slices.
-- `permitted` is the author's authority, read by every pass.
-- `events` is what happened, in order: requests offered, handed over and
-  closed, things said, waits begun and ended, handler failures, the end.
+- `delegate(id, from, to, reason?)` and `reclaim(id, by)` are a participant
+  delegating a request and taking it back. They change the ledger only; the
+  program sees nothing until a reply settles the request.
+- `permitted` is the author's authority, read by every pass, and by
+  `delegate`: a delegation is refused once the author has lost it.
+- `events` is what happened, in order: requests offered, handed over,
+  delegated, given back, taken back and closed, things said, waits begun and
+  ended, handler failures, the end.
 - `notices` is what the author is told: each failed `forEach` handler, once,
   and the program ending without success (a reply other than `Answered`, or a
   program error).

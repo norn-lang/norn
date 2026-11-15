@@ -2,7 +2,7 @@
 // virtual clock. Whoever drives it plays the participants and the world. It
 // never starts an agent or contacts a service.
 import type { Code } from "./code.ts";
-import { emptyLedger, establish, occur, settle, settleDue, slices, type Ledger, type LedgerRequest, type Pass, type Reply, type Step } from "./ledger.ts";
+import { delegate, emptyLedger, establish, occur, reclaim, settle, settleDue, slices, type Delegation, type Ledger, type LedgerRequest, type Pass, type Reply, type Step } from "./ledger.ts";
 import type { Value } from "./value.ts";
 
 /** What happened, in order. A request is shown as it was at that moment. */
@@ -12,6 +12,12 @@ export type TeamEvent = { at: number } & (
   | { kind: "closed"; request: LedgerRequest; reply: Reply }
   /** `handedOver`: the previous holder is released, and the next one offered the same request. */
   | Extract<Step, { kind: "handedOver" | "said" | "waiting" | "waited" | "handlerFailed" }>
+  /**
+   * A participant changed who holds a request (spec §7): it was delegated,
+   * given back by the delegate, or taken back. Whoever holds it now is offered
+   * it; the program is not told.
+   */
+  | (Omit<Delegation, "request" | "at"> & { request: LedgerRequest })
   | { kind: "ended"; status: "completed" | "failed"; result: Value | null; error: string | null }
 );
 /** What the program's author is told: a `forEach` handler that failed, or the program ending without success (spec §10). */
@@ -47,11 +53,37 @@ export class Team {
     this.clock = at;
     for (const request of settleDue(this.ledger, at)) this.events.push({ kind: "closed", at: request.by!, request: { ...request }, reply: request.reply! });
   }
-  /** A participant's reply. False when it settled nothing; the reason is the ledger's last piece of evidence. */
+  /**
+   * A participant's reply. False when it settled nothing: the reason is the
+   * ledger's last piece of evidence, or, when a delegate refused the request or
+   * could not do it, the request went back to whoever delegated it.
+   */
   reply(id: string, holder: string, reply: Reply): boolean {
-    const accepted = settle(this.ledger, id, holder, reply, this.clock);
+    const accepted = this.changing(() => settle(this.ledger, id, holder, reply, this.clock));
     if (accepted) this.events.push({ kind: "closed", at: this.clock, request: { ...this.ledger.requests[id] }, reply });
     return accepted;
+  }
+  /**
+   * The holder delegates a request: `to` answers it for them. Null once it is
+   * delegated, or else why it cannot be. Like a request the program makes, it
+   * needs the author's current authority.
+   */
+  delegate(id: string, from: string, to: string, reason?: string): string | null {
+    if (!this.permitted) return "The program's author has lost the authority to ask anyone";
+    return this.changing(() => delegate(this.ledger, id, from, to, this.clock, { reason }));
+  }
+  /** Whoever delegated a request takes it back. Null once it is back with them, or else why it cannot be. */
+  reclaim(id: string, by: string): string | null {
+    return this.changing(() => reclaim(this.ledger, id, by, this.clock));
+  }
+  /** Does `change` to the ledger, and tells each change of holder it made. */
+  private changing<T>(change: () => T): T {
+    const told = this.ledger.delegations?.length ?? 0;
+    const result = change();
+    for (const { request, at, ...delegation } of (this.ledger.delegations ?? []).slice(told)) {
+      this.events.push({ ...delegation, at, request: { ...this.ledger.requests[request] } });
+    }
+    return result;
   }
   /** Makes a fact hold, or records one occurrence of a stream. */
   emit(source: Value, value: Value): void {

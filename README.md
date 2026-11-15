@@ -26,7 +26,9 @@ together.
 The participants are autonomous: people, and complete AI agents of any kind,
 not model calls or tools. Every call to a participant is a *request*. They may
 answer, refuse, not reply in time, try and fail, or lose the authority to act,
-and the language makes a program handle each case.
+and the language makes a program handle each case. Whoever is asked can also
+delegate the request to someone who answers for them, and the program needs
+no code for that.
 
 A person is one kind of participant, never a required step. Drafting,
 reviewing, deciding and verifying can all be requests between agents, and a
