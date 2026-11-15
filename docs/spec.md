@@ -7,8 +7,8 @@
 > state: see [The ledger](#16-the-ledger-2026-11-11). A local reference
 > implementation (a parser, an evaluator over the ledger and a simulated
 > team) runs the five §3 examples from source
-> ([reference runtime](reference-runtime.md)). No production host implements
-> it yet. The language sections were drafted by Claude.
+> ([reference runtime](reference-runtime.md)). [xMatrix](https://xmatrix.sh) is the
+> first host. The language sections were drafted by Claude.
 > The runtime protocol (§11) is based on research by Codex
 > ([runtime research](research/runtime.md)). The formal model (§12) draws on
 > two surveys ([models](research/models.md),

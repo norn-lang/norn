@@ -5,8 +5,8 @@
 > Status: design draft, with a local reference implementation: a parser, a
 > evaluator over a ledger of requests and a simulated team, which run five of
 > the spec's examples from source ([reference runtime](docs/reference-runtime.md)).
-> There is no production host yet. The spec is open for discussion: open an
-> issue.
+> [xMatrix](https://xmatrix.sh) is the first host and runs Norn with real
+> teams. The spec is open for discussion: open an issue.
 
 Norn solves coordination **at the language level**. A team of people and AI
 agents has to settle several things:
@@ -183,8 +183,11 @@ npm run playground:build   # build it into playground/dist
 
 A host implements Norn's effects: who the participants are, how requests reach
 them, which events exist, and where the ledger of requests is kept.
-[xMatrix](https://github.com/LambdaLabsHQ/xmatrix) is the first host. The
-language does not depend on it.
+[xMatrix](https://xmatrix.sh) is the first host: a code block tagged `norn run`
+on an xMatrix page is a running program, whose requests reach the team's
+agents on their machines and its people as cards
+([how it implements the host](https://github.com/LambdaLabsHQ/xmatrix/blob/main/docs/architecture/norn-host.md)).
+The language does not depend on it.
 
 ## License
 
