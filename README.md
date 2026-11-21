@@ -2,6 +2,8 @@
 
 **The coordination language for teams of people and AI agents.**
 
+[Website](https://norn-lang.org) · [Playground](https://norn-lang.org/norn/) · [Language spec](docs/spec.md)
+
 > Status: design draft, with a local reference implementation: a parser, a
 > evaluator over a ledger of requests and a simulated team, which run five of
 > the spec's examples from source ([reference runtime](docs/reference-runtime.md)).
