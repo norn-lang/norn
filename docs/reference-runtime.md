@@ -79,10 +79,10 @@ stores its result in `ledger.ended` and ends every request it left open
 `Cancelled`. A later pass returns the recorded end and evaluates nothing.
 
 **Program errors.** Division by zero, an unbound name, an unknown label, a
-malformed `choose`, a non-positive timer, `fail(Answered(x))` and stream
-`filter` (not implemented) end the program as a program failure with
-the error's text. They never become `Broke`. Any other exception is the
-runtime's own and propagates.
+malformed `choose`, a non-positive timer, `fail(Answered(x))`, duplicate
+`forEach` keys in one scope, and effectful `map`/`filter`/`filterMap` callbacks
+end the program as a program failure with the error's text. They never become
+`Broke`. Any other exception is the runtime's own and propagates.
 
 **The step budget.** A pass that computes for more than its budget (five
 million machine steps by default) without reaching a wait or finishing ends
@@ -149,11 +149,23 @@ cap.
   `pass.listening` names the host's streams the program's loops take from,
   whether a loop waits or its handler is at work: a host records an
   occurrence for a program that listens, not only for one that waits.
-- A loop does not go back over what it has handled. When a `forEach` handler
-  finishes an occurrence, the ledger keeps how far every identity had counted
-  (`forEach:<stream>/handled`); a later pass begins the loop there. A program
-  that has run for a year evaluates only its current occurrence, and a change
-  to its text asks nothing again for the occurrences behind it.
+- A loop does not go back over what it has handled. Under `identityScheme: 2`
+  (the default for new ledgers), each `forEach` owns a scoped checkpoint
+  (`loop:<key>`, or `$default` when unnamed, with at most one unnamed loop per
+  scope) and seals finished rounds by occurrence key (`timer@<ms>` or
+  `<stream>#<seq>`). Requests inside a round are scoped to that round, carry an
+  immutable `id` separate from their logical `address` (with explicit
+  `recordMove` for renames), and omit `~form` from their identity hash while
+  re-validating recorded `run` answers (`formChanged` / `incompatibleAnswers`).
+  Changing a loop's period or editing surrounding text preserves sealed rounds
+  and open requests without dropping subsequent rounds. `previewEdit` and
+  `norn preview` evaluate old and new texts read-only against a ledger;
+  `migrateLedger` and `verifyMigration` provide a fail-closed read-only
+  migration path from legacy v1 ledgers (ledgers without `identityScheme`
+  continue to run under v1 until explicitly migrated).
+- `filter` and `filterMap` evaluate pure predicates/transforms on stream
+  occurrences (`wait`, `waitUntil`, `or`, `forEach`); functions are excluded
+  from ledger identity.
 
 ## Authority
 
@@ -257,10 +269,9 @@ examples and the contract cases run with `npm test`.
 
 ## Not implemented
 
-Stream `map`/`filter`, structured `scope`, concurrent or coalescing stream
-handlers, child programs, declaring that an edited request continues an old
-one, settling the occurrences of a standing duty separately, dispatch and
-delivery receipts, real agent transports, and a multi-writer protocol for the
-ledger. Unsupported operations fail visibly. The runtime is separate from
-xMatrix's production mechanisms: no schedule, approval, request or PR
-subscription has been migrated to it.
+Structured `scope`, concurrent or coalescing stream handlers, child programs,
+settling the occurrences of a standing duty separately, dispatch and delivery
+receipts, real agent transports, and a multi-writer protocol for the ledger.
+Unsupported operations fail visibly. The runtime is separate from xMatrix's
+production mechanisms: no schedule, approval, request or PR subscription has
+been migrated to it.

@@ -9,8 +9,10 @@ import process from "node:process";
 import {
   STACK_EXHAUSTED, astToJson, formatDiagnostic, isStackExhausted, parse, treeLines, type Diagnostic,
 } from "./frontend/index.ts";
-import { checkSource, readInterface, type CheckDiagnostic, type EffectSummary } from "./frontend/check/index.ts";
+import { checkSource, elaborate, hostSources, readInterface, type CheckDiagnostic, type EffectSummary } from "./frontend/check/index.ts";
 import { referenceHostPath, standardLibrary } from "./frontend/check/node.ts";
+import { compile } from "./runtime/code.ts";
+import { previewEdit, type Ledger } from "./runtime/ledger.ts";
 
 const usage = `Usage: norn <command> [options]
 
@@ -24,6 +26,10 @@ Commands:
                             hosts/reference.norn; that file itself is checked as an
                             interface. --json prints one JSON document with each
                             file's diagnostics and effects summary.
+  preview [--host <file>] [--now <ms|iso>] [--json] --ledger <ledger.json> <before.norn> <after.norn>
+                            Compare old and new program texts against a ledger without
+                            modifying it, reporting kept, opened, unreached, rescheduled,
+                            form-changed, incompatible-answer, and loop differences.
   help                      Show this help
 
 Exit status: 0 without errors (warnings allowed), 1 if a file has errors,
@@ -46,6 +52,8 @@ async function main(argv: string[]): Promise<number> {
         return await parseCommand(args);
       case "check":
         return await checkCommand(args);
+      case "preview":
+        return await previewCommand(args);
       default:
         throw new UsageError(`unknown command '${command}'\n\n${usage}`);
     }
@@ -158,6 +166,87 @@ async function checkCommand(args: string[]): Promise<number> {
     }
   }
   return !host.ok || results.some((result) => !result.ok) ? 1 : 0;
+}
+
+async function previewCommand(args: string[]): Promise<number> {
+  let json = false;
+  let hostOption: string | null = null;
+  let ledgerOption: string | null = null;
+  let nowOption: string | null = null;
+  const files: string[] = [];
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index]!;
+    if (arg === "--json") json = true;
+    else if (arg === "--host" || arg.startsWith("--host=")) {
+      const value = arg === "--host" ? args[++index] : arg.slice("--host=".length);
+      if (!value) throw new UsageError("--host needs an interface file");
+      hostOption = value;
+    } else if (arg === "--ledger" || arg.startsWith("--ledger=")) {
+      const value = arg === "--ledger" ? args[++index] : arg.slice("--ledger=".length);
+      if (!value) throw new UsageError("--ledger needs a ledger JSON file");
+      ledgerOption = value;
+    } else if (arg === "--now" || arg.startsWith("--now=")) {
+      const value = arg === "--now" ? args[++index] : arg.slice("--now=".length);
+      if (!value) throw new UsageError("--now needs epoch milliseconds or an ISO-8601 timestamp");
+      nowOption = value;
+    } else if (arg.startsWith("-") && arg !== "-") throw new UsageError(`unknown option '${arg}' for preview`);
+    else files.push(arg);
+  }
+  if (!ledgerOption || files.length !== 2) {
+    throw new UsageError("preview needs --ledger <ledger.json> <before.norn> <after.norn>");
+  }
+  const now = nowOption === null ? Date.now()
+    : /^\d+$/u.test(nowOption) ? Number(nowOption)
+    : Date.parse(nowOption);
+  if (!Number.isSafeInteger(now) || now < 0) throw new UsageError(`invalid --now value '${nowOption}'`);
+
+  const hostPath = hostOption ?? referenceHostPath();
+  const hostName = hostOption ?? relativeName(hostPath);
+  const hostSource = await read(hostPath);
+  const host = readInterface(hostSource, hostName);
+  if (!host.ok) { report(host.diagnostics, hostSource, hostName); return 1; }
+  const std = standardLibrary(host);
+  const sources = hostSources(host);
+
+  const [beforeSource, afterSource, ledgerText] = await Promise.all([read(files[0]!), read(files[1]!), read(ledgerOption)]);
+  let ledger: Ledger;
+  try { ledger = JSON.parse(ledgerText) as Ledger; } catch (error) {
+    throw new UsageError(`cannot parse ledger JSON ${ledgerOption}: ${describeError(error)}`);
+  }
+  const beforeChecked = checkSource(beforeSource, { host, std });
+  const afterChecked = checkSource(afterSource, { host, std });
+  if (!beforeChecked.ok || !beforeChecked.program) { report(beforeChecked.diagnostics, beforeSource, displayName(files[0]!)); return 1; }
+  if (!afterChecked.ok || !afterChecked.program) { report(afterChecked.diagnostics, afterSource, displayName(files[1]!)); return 1; }
+
+  const beforeCode = compile(elaborate(beforeChecked.program, beforeChecked.reports), { std: std.program, sources });
+  const afterCode = compile(elaborate(afterChecked.program, afterChecked.reports), { std: std.program, sources });
+  const preview = previewEdit(beforeCode, afterCode, ledger, now);
+
+  if (json) {
+    process.stdout.write(`${JSON.stringify({
+      empty: preview.empty,
+      kept: preview.kept.map(r => ({ id: r.id, holder: r.holder, text: r.text })),
+      opened: preview.opened.map(r => ({ id: r.id, holder: r.holder, text: r.text })),
+      unreached: preview.unreached.map(r => ({ id: r.id, holder: r.holder, text: r.text })),
+      answeredUnused: preview.answeredUnused.map(r => ({ id: r.id, holder: r.holder, text: r.text })),
+      rescheduled: preview.rescheduled,
+      formChanged: preview.formChanged.map(c => ({ id: c.id, from: c.from?.text ?? null, to: c.to?.text ?? null })),
+      incompatibleAnswers: preview.incompatibleAnswers.map(c => ({ id: c.id, reason: c.reason, form: c.form?.text ?? null })),
+      loops: preview.loops,
+      nextDue: preview.nextDue,
+    })}\n`);
+  } else {
+    const lines = [
+      `preview: ${preview.empty ? "empty difference" : "changes detected"}`,
+      `  requests: ${preview.kept.length} kept, ${preview.opened.length} to open, ${preview.unreached.length} unreached, ${preview.answeredUnused.length} answered-unused`,
+      ...(preview.rescheduled.length ? [`  rescheduled: ${preview.rescheduled.length}`] : []),
+      ...(preview.formChanged.length ? [`  form changed: ${preview.formChanged.length}`] : []),
+      ...(preview.incompatibleAnswers.length ? [`  incompatible answers: ${preview.incompatibleAnswers.length}`] : []),
+      ...preview.loops.map(l => `  loop ${l.key}: ${l.status} (${l.sealedRounds} sealed rounds, nextDue ${l.beforeNextDue ?? "none"} -> ${l.afterNextDue ?? "none"})`),
+    ];
+    process.stdout.write(`${lines.join("\n")}\n`);
+  }
+  return 0;
 }
 
 /** A diagnostic as `norn check --json` prints it: severity, code, message, span, then expected, found or missing where they apply. */

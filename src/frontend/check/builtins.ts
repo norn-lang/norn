@@ -137,6 +137,11 @@ export function builtinValues(): Builtin[] {
       const a = g();
       return fun([t.stream(a), fun([a], [], t.bool)], [], t.stream(a));
     }],
+    ["filterMap", null, () => {
+      const a = g();
+      const b = g();
+      return fun([t.stream(a), fun([a], [], t.option(b))], [], t.stream(b));
+    }],
     ["gather", null, () => {
       const a = g();
       return fun([t.stream(a)], [], t.stream(t.list(a)));
@@ -144,7 +149,7 @@ export function builtinValues(): Builtin[] {
     // forEach waits for each occurrence, so it counts as the wait family.
     ["forEach", "wait", () => {
       const a = g();
-      return fun([t.stream(a), fun([a], [], g("handled"))], [], g());
+      return fun([t.stream(a), fun([a], [], g("handled"))], [optional("key", t.string)], g());
     }],
   ];
   return values.map(([name, family, type]) => ({ name, family, type: type() }));

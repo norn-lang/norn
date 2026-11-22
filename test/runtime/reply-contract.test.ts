@@ -117,7 +117,7 @@ test("program errors remain errors; every open request ends Cancelled, and the a
     ["1 / 0", "Division by zero"], ["missing", "Unbound name missing"], ["fail(Answered(1))", "fail requires a reply other than Answered"],
     ['ask(@alice, "q", ~until=1h)', "Unknown ask label until"], ['say(@alice, 1)', "say needs a participant or a reference, and text"],
     ['after(0h)->wait', "A relative timer needs a positive duration"], ["status(1)", "status needs a request of this program"],
-    ['ciFailed("acme/api")->filter(x => true)->forEach(x => ())', "Stream filter is not implemented by the reference host yet"],
+    ['ciFailed("acme/api")->forEach(~concurrent=2, x => ())', "Concurrent stream handlers are not implemented by the reference machine yet"],
   ] as const;
   for (const [expression, message] of cases) {
     const { team, pass } = started(`let q = ask(@alice, "Outstanding")\n${expression}`);
