@@ -192,8 +192,8 @@ let label = x => x.label
 let n = label({value: "s", label: "y"})`), {
     b: "box<int>", v: "int", c: "box<int>", label: "(box<'a>) => string", n: "string",
   });
-  // While the type of x is unknown, x.f comes from the latest declared record type with a field f.
-  assert.equal(typeOf("type a = {f: int}\ntype b = {f: string}\nlet g = x => x.f", "g"), "(b) => string");
+  // When multiple records share a field `f`, x.f infers a row presence constraint instead of guessing the latest declared record.
+  assert.equal(typeOf("type a = {f: int}\ntype b = {f: string}\nlet g = x => x.f", "g"), "('a) => 'b where 'a: {f: 'b, ..}");
   // The host's records are declared first.
   assert.equal(typeOf("let version = r => r.version", "version"), "(release) => string");
   assert.equal(typeOf("let r = {version: \"1.2\"}", "r"), "release");

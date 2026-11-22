@@ -207,6 +207,8 @@ function collectAllNames(roots: unknown[]): Set<string> {
   return names;
 }
 
+const BUILTIN_MODULES = new Set(["String", "List", "Option", "Result", "JSON", "Events"]);
+
 function collectModuleRefs(program: Program): Set<string> {
   const modules = new Set<string>();
   const pending: unknown[] = [program];
@@ -216,9 +218,9 @@ function collectModuleRefs(program: Program): Set<string> {
     if (Array.isArray(value)) { pending.push(...value); continue; }
     if ("kind" in value) {
       const node = value as AstNode;
-      if (node.kind === "Open") modules.add(node.module);
-      else if (node.kind === "QualifiedIdentifier") modules.add(node.module);
-      else if (node.kind === "Needs") modules.add(node.module);
+      if (node.kind === "Open" && !BUILTIN_MODULES.has(node.module)) modules.add(node.module);
+      else if (node.kind === "QualifiedIdentifier" && !BUILTIN_MODULES.has(node.module)) modules.add(node.module);
+      else if (node.kind === "Needs" && !BUILTIN_MODULES.has(node.module)) modules.add(node.module);
     }
     for (const child of Object.values(value)) pending.push(child);
   }
@@ -231,7 +233,10 @@ function hasQualifiedIdentifier(program: Program): boolean {
     const value = pending.pop();
     if (!value || typeof value !== "object") continue;
     if (Array.isArray(value)) { pending.push(...value); continue; }
-    if ("kind" in value && (value as AstNode).kind === "QualifiedIdentifier") return true;
+    if ("kind" in value && (value as AstNode).kind === "QualifiedIdentifier") {
+      const q = value as Extract<AstNode, { kind: "QualifiedIdentifier" }>;
+      if (!BUILTIN_MODULES.has(q.module)) return true;
+    }
     for (const child of Object.values(value)) pending.push(child);
   }
   return false;
@@ -246,7 +251,8 @@ function rewriteQualified(roots: unknown[], hiddenFor: ReadonlyMap<string, strin
       for (let i = 0; i < value.length; i++) {
         const item = value[i];
         if (item && typeof item === "object" && "kind" in item && (item as AstNode).kind === "QualifiedIdentifier") {
-          value[i] = toFieldAccess(item as Extract<AstNode, { kind: "QualifiedIdentifier" }>, hiddenFor);
+          const q = item as Extract<AstNode, { kind: "QualifiedIdentifier" }>;
+          if (!BUILTIN_MODULES.has(q.module)) value[i] = toFieldAccess(q, hiddenFor);
         } else {
           pending.push(item);
         }
@@ -257,7 +263,8 @@ function rewriteQualified(roots: unknown[], hiddenFor: ReadonlyMap<string, strin
     for (const key of Object.keys(record)) {
       const child = record[key];
       if (child && typeof child === "object" && "kind" in child && (child as AstNode).kind === "QualifiedIdentifier") {
-        record[key] = toFieldAccess(child as Extract<AstNode, { kind: "QualifiedIdentifier" }>, hiddenFor);
+        const q = child as Extract<AstNode, { kind: "QualifiedIdentifier" }>;
+        if (!BUILTIN_MODULES.has(q.module)) record[key] = toFieldAccess(q, hiddenFor);
       } else {
         pending.push(child);
       }

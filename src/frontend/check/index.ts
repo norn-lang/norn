@@ -12,10 +12,14 @@
  * a browser. `node.ts` reads the reference host and the standard library from
  * this repository's files.
  */
-export { FAMILIES, type Family } from "./builtins.ts";
+export { FAMILIES, builtinModuleExports, type Family } from "./builtins.ts";
 export { CODES, type CheckDiagnostic, type Code, type DiagnosticFix, type DiagnosticSecondary, type Severity } from "./diagnostics.ts";
 export type { EffectSummary } from "./effects.ts";
-export { elaborate } from "./elaborate.ts";
+export { elaborate, type FormEvidencePlan } from "./elaborate.ts";
+export {
+  EVENTS_INTERFACE_SOURCE, validateEventKindAgainstManifests,
+  type ConnectorEventSpec, type ConnectorFieldSpec, type ConnectorManifest,
+} from "./events.ts";
 export type { Form, FormDefinition, FormRefusal, ReportForm } from "./forms.ts";
 export { checkProgram, loadLibrary, type CheckOptions, type CheckResult, type Library, type LoadLibraryOptions } from "./infer.ts";
 export { builtinInterface, hostSources, loadInterface, type HostInterface, type ValueBinding } from "./interface.ts";

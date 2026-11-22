@@ -3,7 +3,7 @@
 // reports which requests should exist now. Nothing here dispatches anything.
 import type { ReportForm } from "../frontend/check/forms.ts";
 import type { Code } from "./code.ts";
-import { mismatch } from "./form.ts";
+import { mismatch, mismatchAll, type FormPathError } from "./form.ts";
 import { advance, resume, resumeThrough, runPure, start, type Effect, type Through } from "./machine.ts";
 import { sha256 } from "./sha256.ts";
 import { equal, eventKey, show, text, unit, variant, type Json, type Value } from "./value.ts";
@@ -88,8 +88,89 @@ export interface Ledger {
   delegations: Delegation[];
   /** Explicit address rebindings so renamed loops or requests continue existing ledger entries. */
   moves?: MovedAddress[];
+  /** CloudEvents `(app, kind, source, id)` deduplication map (key -> receivedAt ms). */
+  seenEvents?: Record<string, number>;
+  /** Structured path errors recorded when an incoming CloudEvent payload failed form validation. */
+  eventErrors?: { at: number; app: string; kind: string; source: string; id: string; errors: FormPathError[] }[];
   /** The program's result, recorded once with the cancellation of what it left open. A later pass returns it and evaluates nothing. */
   ended: { at: number; status: "completed" | "failed"; result: Value | null; error: string | null } | null;
+}
+
+/** A CloudEvents 1.0.2 event delivered into a ledger via the `Events` standard capability interface. */
+export interface CloudEventInput {
+  specversion?: string;
+  app: string;
+  kind: string;
+  source: string;
+  id: string;
+  occurredAt?: number | null;
+  subject?: string | null;
+  data: Value;
+}
+
+export interface EventDeliveryResult {
+  delivered: boolean;
+  deduplicated: boolean;
+  errors?: FormPathError[];
+}
+
+/**
+ * Delivers one CloudEvents 1.0.2 event into the ledger for any `Events.events`
+ * listeners: deduplicates idempotently by `(app, kind, source, id)`, records
+ * `receivedAt = now` with optional `occurredAt` and `subject`, validates payload
+ * against `form` when provided (ignoring extra fields and recording structured
+ * path errors instead of silently dropping), and appends matching stream occurrences.
+ */
+export function deliverEvent(
+  ledger: Ledger,
+  event: CloudEventInput,
+  now: number,
+  options: { form?: ReportForm; matchSources?: readonly Value[] } = {},
+): EventDeliveryResult {
+  const dedupKey = `${event.app}:${event.kind}:${event.source}:${event.id}`;
+  ledger.seenEvents ??= {};
+  if (Object.hasOwn(ledger.seenEvents, dedupKey)) {
+    return { delivered: false, deduplicated: true };
+  }
+  if (options.form) {
+    const errors = mismatchAll(event.data, options.form, { ignoreExtraFields: true });
+    if (errors.length > 0) {
+      ledger.seenEvents[dedupKey] = now;
+      (ledger.eventErrors ??= []).push({ at: now, app: event.app, kind: event.kind, source: event.source, id: event.id, errors });
+      return { delivered: false, deduplicated: false, errors };
+    }
+  }
+  ledger.seenEvents[dedupKey] = now;
+  const envelope: Value = {
+    type: "record",
+    fields: {
+      specversion: text(event.specversion ?? "1.0"),
+      kind: text(event.kind),
+      source: text(event.source),
+      id: text(event.id),
+      occurredAt: event.occurredAt != null ? variant("Some", { type: "time", value: String(event.occurredAt) }) : variant("None"),
+      subject: event.subject != null ? variant("Some", text(event.subject)) : variant("None"),
+      receivedAt: { type: "time", value: String(now) },
+      data: event.data,
+    },
+  };
+  const kindVal = variant("EventKind", text(event.app), text(event.kind));
+  const shapes: Value[] = [
+    { type: "source", kind: "stream", name: "Events.events", args: [kindVal], labels: {} },
+    { type: "source", kind: "stream", name: "Events.events", args: [kindVal], labels: { source: text(event.source) } },
+    ...(event.subject != null ? [
+      { type: "source", kind: "stream", name: "Events.events", args: [kindVal], labels: { subject: text(event.subject) } } as Value,
+      { type: "source", kind: "stream", name: "Events.events", args: [kindVal], labels: { source: text(event.source), subject: text(event.subject) } } as Value,
+    ] : []),
+  ];
+  const seenKeys = new Set<string>();
+  for (const src of options.matchSources ?? shapes) {
+    const key = eventKey(src);
+    if (seenKeys.has(key)) continue;
+    seenKeys.add(key);
+    ledger.occurrences.push({ key, at: now, value: envelope });
+  }
+  return { delivered: true, deduplicated: false };
 }
 /**
  * A change of holder made by a participant, not by the program (spec §7): the
@@ -177,6 +258,8 @@ export interface Pass {
   formChanged: { id: string; from: ReportForm | null; to: ReportForm | null }[];
   /** Answered requests whose recorded answer no longer fits the edited program's form. */
   incompatibleAnswers: { id: string; reason: string; form: ReportForm | null }[];
+  /** Answers rejected by an `accepting` request validator during this pass. */
+  validationErrors?: { id: string; reason: string; errors: FormPathError[] }[];
   /** All request IDs (open or answered) reached by this pass. */
   reached: string[];
   /** Loops observed during this pass (identityScheme 2). */
@@ -409,6 +492,7 @@ function hostStreams(stream: Value): Source[] {
  * positions or operand ordering.
  */
 function stripSourceFunctions(value: Value): unknown {
+  if (value.type === "request") return { type: "request", id: value.id };
   if (value.type !== "source") return value;
   if (value.name === "map" || value.name === "filter" || value.name === "filterMap") {
     return stripSourceFunctions(value.args[0]);
@@ -699,7 +783,7 @@ export function* slices(code: Code, source: Ledger, now: number, options: PassOp
       if (choices && (choices.type !== "list" || !choices.values.length || choices.values.some(v => v.type !== "variant"))) {
         throw new ProgramError("choose options must be a nonempty list of constructors");
       }
-      const nextForm = labels.form?.type === "string" ? JSON.parse(labels.form.value) as ReportForm : null;
+      const nextForm = labels.form?.type === "string" && labels.form.value !== "" ? JSON.parse(labels.form.value) as ReportForm : null;
       const { by: _by, form: _form, ...keptV2 } = labels;
       const { by: _by1, ...keptV1 } = labels;
       const kept = v2 ? keptV2 : keptV1;
@@ -1001,7 +1085,42 @@ export function* slices(code: Code, source: Ledger, now: number, options: PassOp
           if (target.kind === "request") {
             const request = ledger.requests[target.id];
             if (lost && request.reply === null) close(request, { tag: "Revoked" }, now);
-            if (request.reply) occurred(request.settledAt!, replyValue(request.reply), [], request.reply.tag === "NoReply" ? 0 : 2);
+            if (request.reply) {
+              // Apply any pure `accepting` validators attached to the request handle.
+              const validators = args[0].type === "request" ? (args[0].validators ?? []) : [];
+              if (request.reply.tag === "Answered" && validators.length > 0) {
+                let currentVal = request.reply.value;
+                let rejectedReason: string | null = null;
+                for (const fn of validators) {
+                  let res: Value;
+                  try {
+                    res = runPure(code, fn, currentVal, machine, now);
+                  } catch (err) {
+                    throw new ProgramError(err instanceof Error ? err.message : String(err));
+                  }
+                  if (res.type === "variant" && res.name === "Ok" && res.args.length === 1) {
+                    currentVal = res.args[0]!;
+                  } else if (res.type === "variant" && res.name === "Error" && res.args.length === 1 && res.args[0]!.type === "string") {
+                    rejectedReason = res.args[0]!.value;
+                    break;
+                  } else {
+                    throw new ProgramError("accepting validator must return Ok(value) or Error(string)");
+                  }
+                }
+                if (rejectedReason !== null) {
+                  const errItem: FormPathError = { path: "$", expected: "accepted value", found: show(request.reply.value) };
+                  ledger.evidence.push({ request: request.id, holder: request.holder, at: now, reply: request.reply, reason: rejectedReason });
+                  (pass.validationErrors ??= []).push({ id: request.id, reason: rejectedReason, errors: [errItem] });
+                  request.reply = null;
+                  request.settledAt = null;
+                  if (request.by !== null) due(request.by);
+                } else {
+                  occurred(request.settledAt!, replyValue({ tag: "Answered", value: currentVal }), [], 2);
+                }
+              } else {
+                occurred(request.settledAt!, replyValue(request.reply), [], request.reply.tag === "NoReply" ? 0 : 2);
+              }
+            }
             else if (request.by !== null) due(request.by);
           } else if (target.kind === "timer") {
             if (!usePureEval) {

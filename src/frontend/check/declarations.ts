@@ -10,7 +10,7 @@ import type * as A from "../ast.ts";
 import { closest, type CheckDiagnostic } from "./diagnostics.ts";
 import { REMOVED_TYPES } from "./removed.ts";
 import {
-  FACT, GENERIC, OCCURRENCE, REQUEST, SOURCE, con, fun, newVar, rebuild, requestOf, source, tuple, type EqualityRule, type TLabel, type TParam, type Type,
+  FACT, GENERIC, OCCURRENCE, REQUEST, SOURCE, con, fun, newVar, rebuild, requestOf, source, substitute, tuple, type EqualityRule, type TLabel, type TParam, type Type,
   type TypeFacts,
 } from "./types.ts";
 
@@ -94,6 +94,23 @@ export class TypeTable implements TypeFacts {
     return { never: info.equality.never, params: [...info.equality.params] };
   }
 
+  /** Looks up field `field` on nominal record type `name`, instantiating its parameters with `args`. */
+  recordField(name: string, field: string, args: readonly Type[], level: number): Type | null | "opaque" {
+    const info = this.lookupType(name);
+    if (!info || info.kind !== "record") return null;
+    if (this.isSealedOpaque(info)) return "opaque";
+    const found = info.fields.find((f) => f.name === field);
+    if (!found) return null;
+    return substitute(found.type, args, level);
+  }
+
+  /** All accessible record types that contain all of `fields` (order-independent). */
+  recordsWithAll(fields: readonly string[]): TypeInfo[] {
+    return this.records.filter(
+      (record) => !this.isSealedOpaque(record) && fields.every((field) => record.fields.some((declared) => declared.name === field)),
+    );
+  }
+
   /** The latest declared record type with all of these fields, or null (skipping sealed opaque types). */
   recordWith(fields: readonly string[]): TypeInfo | null {
     for (let index = this.records.length - 1; index >= 0; index -= 1) {
@@ -125,7 +142,8 @@ export class TypeTable implements TypeFacts {
     if (info.library) {
       const qname = `${info.library}.${info.name}`;
       this.qualifiedTypes.set(qname, info);
-      // Generative opaque types are stored by canonical qualified name so they can never collide or be forged.
+      // Also allow lookups by internal unqualified name (e.g. from library function return types) without exposing it as a user-visible unqualified type name unless opened.
+      if (!this.qualifiedTypes.has(info.name)) this.qualifiedTypes.set(info.name, info);
       if (info.opaque) this.types.set(qname, info);
     }
     if (!qualifiedOnly) {

@@ -104,6 +104,10 @@ export const CODES = {
   "library-effect": "a library top-level binding may not perform effects; wrap effectful work in a function",
   "missing-needs": "a library requires a module via needs that was not supplied",
   "type-hole": "a _ type hole inferred by the checker",
+  "unknown-event-kind": "Events.kind names an app or event kind that is not in the connector manifest",
+  "manifest-field-mismatch": "a payload type requests a field not declared by the connector event manifest",
+  "missing-row-field": "a record does not contain a field required by a row constraint",
+  "default-report-form": "a run's report type was not constrained and defaulted to the host report",
 } as const;
 
 export type Code = keyof typeof CODES;
