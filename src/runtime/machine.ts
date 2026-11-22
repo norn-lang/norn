@@ -9,6 +9,10 @@ export interface Effect {
   loop?: "begins" | "continues";
   /** Explicit key naming this `forEach` loop inside its enclosing scope, or null when unnamed. */
   loopKey?: string | null;
+  /** Concurrency / burst strategy on `forEach` (`~each`). */
+  eachStrategy?: "Queue" | "Latest" | "Restart" | "Together" | "Batch";
+  /** Optional partition key extractor on `forEach` (`~per`). */
+  perKey?: Value | null;
 }
 type Control =
   | { kind: "eval"; node: string; env: string }
@@ -32,7 +36,8 @@ type Frame =
   | { kind: "try" }
   | { kind: "return" }
   | { kind: "default"; lambda: string; remaining: string[]; env: string; pattern: string }
-  | { kind: "forEach"; stream: Value; callback: Value; loopKey: string | null; stage: "waiting" | "handling" | "reporting" }
+  | { kind: "forEach"; stream: Value; callback: Value; loopKey: string | null; eachStrategy: "Queue" | "Latest" | "Restart" | "Together" | "Batch"; perKey: Value | null; stage: "waiting" | "handling" | "reporting" }
+  | { kind: "within"; callback: Value; stage: "entering" | "running" | "exiting"; result?: Value }
   | { kind: "through"; steps: Through[] }
   | { kind: "pureReturn" };
 /** What a stream's value passes through on its way to the program: a function given to `map`, or a constructor around it. */
@@ -44,8 +49,12 @@ export interface Machine {
   nextEnvironment: number;
   resumedAt: number;
 }
-const effectBuiltins = new Set(["ask", "confirm", "choose", "run", "wait", "waitUntil", "cancel", "handOver", "status", "say", "judge", "first"]);
-const builtins = new Set([...effectBuiltins, "now", "show", "ignore", "fail", "or", "never", "map", "filter", "filterMap", "gather", "forEach", "anyOf", "accepting"]);
+const effectBuiltins = new Set(["ask", "confirm", "choose", "run", "wait", "waitUntil", "cancel", "handOver", "status", "say", "judge", "first", "sameAs", "spawn"]);
+const builtins = new Set([
+  ...effectBuiltins,
+  "now", "show", "ignore", "fail", "or", "merge", "never", "map", "mapRequest", "filter", "filterMap", "scan", "timed", "gather",
+  "forEach", "anyOf", "accepting", "taken", "notes", "within",
+]);
 
 export function start(code: Code, now = 0): Machine {
   return { control: { kind: "eval", node: code.root, env: "e0" }, frames: [],
@@ -232,7 +241,7 @@ function builtin(code: Code, machine: Machine, name: string, args: Value[], labe
     case "anyOf": {
       const [group] = args, { except, ...other } = labels;
       if (args.length !== 1 || group.type !== "list" || !group.values.length || group.values.some(v => v.type !== "participant" || v.name === "anyOf") ||
-          Object.keys(other).length || (except !== undefined && except.type !== "participant")) {
+          Object.keys(other).length || (except !== undefined && except.type !== "participant" && except.type !== "request")) {
         throw new Error("anyOf needs a nonempty list of participants, and at most ~except");
       }
       // A group is a participant: whoever takes the request first holds it, and nobody else does.
@@ -242,7 +251,7 @@ function builtin(code: Code, machine: Machine, name: string, args: Value[], labe
       if (args.length || Object.keys(labels).length) throw new Error("never takes no arguments");
       value = { type: "source", kind: "stream", name, args, labels }; break;
     }
-    case "or": {
+    case "or": case "merge": {
       if (args.length !== 2 || Object.keys(labels).length || args.some(a => a.type !== "source" || a.kind !== "stream")) throw new Error(`${name} needs two positional streams`);
       value = { type: "source", kind: "stream", name, args, labels }; break;
     }
@@ -250,15 +259,42 @@ function builtin(code: Code, machine: Machine, name: string, args: Value[], labe
       if (args.length !== 2 || args[0].type !== "source" || args[0].kind !== "stream" || !["closure", "builtin"].includes(args[1].type)) throw new Error(`${name} needs a stream and function`);
       value = { type: "source", kind: "stream", name, args, labels }; break;
     }
-    case "gather": {
-      if (args.length !== 1 || Object.keys(labels).length || args[0].type !== "source" || args[0].kind !== "stream") throw new Error("gather needs one stream");
+    case "scan": {
+      if (args.length !== 3 || Object.keys(labels).length || args[0].type !== "source" || args[0].kind !== "stream" || !["closure", "builtin"].includes(args[2].type)) {
+        throw new Error("scan needs a stream, initial state, and pure reducer function");
+      }
       value = { type: "source", kind: "stream", name, args, labels }; break;
+    }
+    case "timed": case "gather": {
+      if (args.length !== 1 || Object.keys(labels).length || args[0].type !== "source" || args[0].kind !== "stream") throw new Error(`${name} needs one stream`);
+      value = { type: "source", kind: "stream", name, args, labels }; break;
+    }
+    case "taken": {
+      if (args.length !== 1 || Object.keys(labels).length || args[0].type !== "request") throw new Error("taken needs one request");
+      value = { type: "source", kind: "fact", name: "taken", args, labels }; break;
+    }
+    case "notes": {
+      if (args.length !== 1 || Object.keys(labels).length || args[0].type !== "request") throw new Error("notes needs one request");
+      value = { type: "source", kind: "stream", name: "notes", args, labels }; break;
     }
     case "accepting": {
       if (args.length !== 2 || Object.keys(labels).length || args[0].type !== "request" || !["closure", "builtin"].includes(args[1].type)) {
         throw new Error("accepting needs a request and a pure validator function");
       }
-      value = { type: "request", id: args[0].id, validators: [...(args[0].validators ?? []), args[1]] }; break;
+      value = { type: "request", id: args[0].id, transforms: [...(args[0].transforms ?? []), { kind: "validate", fn: args[1] }] }; break;
+    }
+    case "mapRequest": {
+      if (args.length !== 2 || Object.keys(labels).length || args[0].type !== "request" || !["closure", "builtin"].includes(args[1].type)) {
+        throw new Error("mapRequest needs a request and a pure function");
+      }
+      value = { type: "request", id: args[0].id, transforms: [...(args[0].transforms ?? []), { kind: "map", fn: args[1] }] }; break;
+    }
+    case "within": {
+      if (args.length !== 2 || Object.keys(labels).length || !["closure", "builtin"].includes(args[1].type)) {
+        throw new Error("within needs a deadline and a zero-argument function");
+      }
+      machine.frames.push({ kind: "within", callback: args[1], stage: "entering" });
+      machine.control = { kind: "effect", effect: { name: "withinEnter", args: [args[0]], labels: {} } }; return;
     }
     case "Events.kind": {
       if (args.length !== 2 || args[0].type !== "string" || args[1].type !== "string" || Object.keys(labels).length) {
@@ -274,12 +310,23 @@ function builtin(code: Code, machine: Machine, name: string, args: Value[], labe
     }
     case "forEach": {
       if (args.length !== 2 || args[0].type !== "source" || args[0].kind !== "stream") throw new Error("forEach needs a stream and callback");
-      const { key, ...restLabels } = labels;
-      if (Object.keys(restLabels).length) throw new Error("Concurrent stream handlers are not implemented by the reference machine yet");
+      const { key, each, per, ...restLabels } = labels;
+      if (Object.keys(restLabels).length) throw new Error(`Unknown forEach label ${Object.keys(restLabels)[0]}`);
       if (key !== undefined && key.type !== "string") throw new Error("forEach ~key must be a string");
+      let eachStrategy: "Queue" | "Latest" | "Restart" | "Together" | "Batch" = "Latest";
+      if (each !== undefined) {
+        if (each.type !== "variant" || each.args.length !== 0 || !["Queue", "Latest", "Restart", "Together", "Batch"].includes(each.name)) {
+          throw new Error("forEach ~each must be Queue, Latest, Restart, Together, or Batch");
+        }
+        eachStrategy = each.name as typeof eachStrategy;
+      }
+      if (per !== undefined && !["closure", "builtin"].includes(per.type)) {
+        throw new Error("forEach ~per must be a pure function");
+      }
       const loopKey = key ? key.value : null;
-      machine.frames.push({ kind: "forEach", stream: args[0], callback: args[1], loopKey, stage: "waiting" });
-      machine.control = { kind: "effect", effect: { name: "wait", args: [args[0]], labels: {}, loop: "begins", loopKey } }; return;
+      const perKey = per ?? null;
+      machine.frames.push({ kind: "forEach", stream: args[0], callback: args[1], loopKey, eachStrategy, perKey, stage: "waiting" });
+      machine.control = { kind: "effect", effect: { name: "wait", args: [args[0]], labels: {}, loop: "begins", loopKey, eachStrategy, perKey } }; return;
     }
     default: {
       const modResult = evalBuiltinModule(code, machine, name, args, labels);
@@ -624,6 +671,18 @@ function accept(code: Code, machine: Machine, value: Value): void {
       machine.control = { kind: "done", value };
       break;
     }
+    case "within": {
+      if (frame.stage === "entering") {
+        machine.frames.push({ kind: "within", callback: frame.callback, stage: "running" });
+        invoke(code, machine, frame.callback, [], {});
+      } else if (frame.stage === "running") {
+        machine.frames.push({ kind: "within", callback: frame.callback, stage: "exiting", result: value });
+        machine.control = { kind: "effect", effect: { name: "withinExit", args: [], labels: {} } };
+      } else {
+        machine.control = { kind: "value", value: frame.result ?? value };
+      }
+      break;
+    }
     case "forEach": {
       if (frame.stage === "waiting") {
         // After the callback, wait for another occurrence. A unit callback result
@@ -634,7 +693,11 @@ function accept(code: Code, machine: Machine, value: Value): void {
         machine.frames.push({ ...frame, stage: "reporting" });
         machine.control = { kind: "report", outcome: value };
       } else {
-        machine.frames.push({ ...frame, stage: "waiting" }); machine.control = { kind: "effect", effect: { name: "wait", args: [frame.stream], labels: {}, loop: "continues", loopKey: frame.loopKey } };
+        machine.frames.push({ ...frame, stage: "waiting" });
+        machine.control = {
+          kind: "effect",
+          effect: { name: "wait", args: [frame.stream], labels: {}, loop: "continues", loopKey: frame.loopKey, eachStrategy: frame.eachStrategy, perKey: frame.perKey },
+        };
       }
       break;
     }
@@ -679,12 +742,7 @@ export function advance(code: Code, machine: Machine, steps = 1_000): Machine {
   return machine;
 }
 
-/**
- * Evaluates a pure unary function (`map`, `filter`, `filterMap`) on one value
- * inside an isolated sub-machine. Any effect or failure is refused so stream
- * predicates and transforms stay pure and deterministic.
- */
-export function runPure(code: Code, fn: Value, arg: Value, envSource: Machine, now: number, maxSteps = 100_000): Value {
+function copyEnvsFor(fn: Value, args: Value[], envSource: Machine): Machine["environments"] {
   const environments: Machine["environments"] = {};
   const copyEnv = (id: string): void => {
     if (environments[id]) return;
@@ -701,19 +759,53 @@ export function runPure(code: Code, fn: Value, arg: Value, envSource: Machine, n
     };
     Object.values(entry.bindings).forEach(walk);
   };
-  if (fn.type === "closure") copyEnv(fn.environment);
+  const walkVal = (v: unknown): void => {
+    if (!v || typeof v !== "object") return;
+    if (Array.isArray(v)) { v.forEach(walkVal); return; }
+    const item = v as Record<string, unknown>;
+    if (item.type === "closure" && typeof item.environment === "string") copyEnv(item.environment);
+    Object.values(item).forEach(walkVal);
+  };
+  walkVal(fn);
+  walkVal(args);
+  return environments;
+}
+
+/** Starts a sub-machine invoking a closure with captured lexical environments (for `spawn`). */
+export function startClosure(code: Code, fn: Value, args: Value[], envSource: Machine, now: number): Machine {
   const sub: Machine = {
     control: { kind: "value", value: unit },
-    frames: [{ kind: "pureReturn" }],
-    environments,
+    frames: [],
+    environments: copyEnvsFor(fn, args, envSource),
     nextEnvironment: envSource.nextEnvironment,
     resumedAt: now,
   };
-  invoke(code, sub, fn, [arg], {});
+  invoke(code, sub, fn, args, {});
+  return sub;
+}
+
+/**
+ * Evaluates a pure function on one or more arguments inside an isolated
+ * sub-machine. Any effect or failure is refused so stream predicates,
+ * transforms, validators, and admission policies stay pure and deterministic.
+ */
+export function runPureArgs(code: Code, fn: Value, args: Value[], envSource: Machine, now: number, maxSteps = 100_000): Value {
+  const sub: Machine = {
+    control: { kind: "value", value: unit },
+    frames: [{ kind: "pureReturn" }],
+    environments: copyEnvsFor(fn, args, envSource),
+    nextEnvironment: envSource.nextEnvironment,
+    resumedAt: now,
+  };
+  invoke(code, sub, fn, args, {});
   advance(code, sub, maxSteps);
   if (sub.control.kind === "done") return sub.control.value;
-  if (sub.control.kind === "effect") throw new Error("A function given to map, filter or filterMap may not perform effects");
+  if (sub.control.kind === "effect") throw new Error("A pure callback may not perform effects");
   if (sub.control.kind === "error") throw new Error(sub.control.message);
-  if (sub.control.kind === "failed") throw new Error("A function given to map, filter or filterMap cannot fail with a reply");
-  throw new Error("A function given to map, filter or filterMap computed for too long");
+  if (sub.control.kind === "failed") throw new Error("A pure callback cannot fail with a reply");
+  throw new Error("A pure callback computed for too long");
+}
+
+export function runPure(code: Code, fn: Value, arg: Value, envSource: Machine, now: number, maxSteps = 100_000): Value {
+  return runPureArgs(code, fn, [arg], envSource, now, maxSteps);
 }

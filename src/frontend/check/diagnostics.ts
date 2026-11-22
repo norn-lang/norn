@@ -108,6 +108,8 @@ export const CODES = {
   "manifest-field-mismatch": "a payload type requests a field not declared by the connector event manifest",
   "missing-row-field": "a record does not contain a field required by a row constraint",
   "default-report-form": "a run's report type was not constrained and defaulted to the host report",
+  "impure-callback": "a stream combinator or accepting validator callback must be pure and cannot perform effects",
+  "missing-deadline": "requests in edition 1 require an explicit ~by deadline (or ~by=never)",
 } as const;
 
 export type Code = keyof typeof CODES;

@@ -68,6 +68,8 @@ export interface CheckOptions {
   manifests?: readonly ConnectorManifest[];
   /** When true, emit a `default-report-form` warning when an unconstrained `run` falls back to host `report`. */
   warnDefaultReport?: boolean;
+  /** When true (edition 1 strict mode), require explicit `~by` on `ask`/`confirm`/`choose`/`run`. */
+  requireDeadline?: boolean;
 }
 
 export interface CheckResult {
@@ -87,7 +89,7 @@ export interface CheckResult {
 /** Checks a program against a host interface, `Std`, and any named libraries. */
 export function checkProgram(program: A.Program, options: CheckOptions): CheckResult {
   const libs = options.libraries ?? {};
-  const checker = new Checker(options.host, options.std, libs, null, false, options.manifests ?? [], options.warnDefaultReport ?? false);
+  const checker = new Checker(options.host, options.std, libs, null, false, options.manifests ?? [], options.warnDefaultReport ?? false, options.requireDeadline ?? false);
   checker.run(program);
   const diagnostics = sortDiagnostics(checker.diagnostics);
   const ok = !diagnostics.some((diagnostic) => diagnostic.severity === "error");
@@ -239,6 +241,7 @@ export class Checker {
   private readonly builtinModules: Readonly<Record<string, readonly ValueBinding[]>>;
   private readonly manifests: readonly ConnectorManifest[];
   private readonly warnDefaultReport: boolean;
+  private readonly requireDeadline: boolean;
   private readonly libraryName: string | null;
   private readonly strictVisibility: boolean;
   private hasExplicitPub = false;
@@ -265,6 +268,8 @@ export class Checker {
   private readonly eventKindCalls: { app: string; kind: string; payload: Type; span: A.Span }[] = [];
   /** `JSON.decode(x)` calls queued for external opaque-type check. */
   private readonly jsonDecodeCalls: { target: Type; span: A.Span }[] = [];
+  /** Pure stream/validator callbacks queued for static purity verification (`{}`). */
+  private readonly pureCallbacks: { name: string; fn: A.Expression; span: A.Span }[] = [];
   readonly reports: { node: A.Call | A.Pipe; form: ReportForm; defaulted?: boolean }[] = [];
   readonly formEvidence: { lambdas: A.Lambda[]; forwardedRuns: (A.Call | A.Pipe)[]; callSites: { node: A.Call | A.Pipe; form: ReportForm }[] } = {
     lambdas: [], forwardedRuns: [], callSites: [],
@@ -289,12 +294,14 @@ export class Checker {
     strictVisibility = false,
     manifests: readonly ConnectorManifest[] = [],
     warnDefaultReport = false,
+    requireDeadline = false,
   ) {
     this.host = host;
     this.std = std;
     this.libraries = libraries;
     this.manifests = manifests;
     this.warnDefaultReport = warnDefaultReport;
+    this.requireDeadline = requireDeadline;
     this.libraryName = libraryName;
     this.strictVisibility = strictVisibility;
     this.table = new TypeTable(host.table, libraryName);
@@ -1068,7 +1075,17 @@ export class Checker {
       for (const arg of args) this.infer(arg.kind === "LabelledArg" ? arg.value : arg);
       return newVar(this.level);
     }
-    if (name !== null && callee.binding?.origin === "builtin" && ["ask", "confirm", "choose", "run"].includes(name)) this.sameRequest(node, name, first?.expression ?? null, args);
+    if (name !== null && callee.binding?.origin === "builtin" && ["ask", "confirm", "choose", "run"].includes(name)) {
+      this.sameRequest(node, name, first?.expression ?? null, args);
+      if (this.requireDeadline && !args.some((a) => a.kind === "LabelledArg" && a.label === "by")) {
+        this.error("missing-deadline", `${name} requires an explicit ~by deadline in edition 1 (for example ~by=8h)`, node.span);
+      }
+    }
+    if (name !== null && callee.binding?.origin === "builtin" && ["map", "filter", "filterMap", "scan", "accepting", "mapRequest"].includes(name)) {
+      const positionalArgs = [...(first ? [first.expression] : []), ...args.filter((a): a is A.Expression => a.kind !== "LabelledArg")];
+      const cb = name === "scan" ? positionalArgs[2] : positionalArgs[1];
+      if (cb) this.pureCallbacks.push({ name, fn: cb, span: cb.span });
+    }
     if (isBuiltin(callee, "run")) {
       const report = this.reportOf(shape);
       const reportVar = resolve(report);
@@ -1944,6 +1961,19 @@ export class Checker {
           "opaque-form",
           `JSON.decode cannot construct opaque type ${form.library}.${form.name}: only ${form.library} can construct ${form.name}`,
           dec.span,
+        );
+      }
+    }
+    // Static purity enforcement (`{}`) on stream combinators & accepting callbacks.
+    for (const cb of this.pureCallbacks) {
+      const targetBody: A.TopLevelItem[] = cb.fn.kind === "Lambda" ? [cb.fn.body] : [cb.fn];
+      const synthetic: A.Program = { kind: "Program", body: targetBody, span: cb.span };
+      const cbEffects = effectsSummary(synthetic, this.resolutions, this.std, this.libraries);
+      if (cbEffects.length > 0) {
+        this.error(
+          "impure-callback",
+          `${cb.name} callback must be pure and cannot perform effects (${cbEffects.map((e) => e.family).join(", ")})`,
+          cb.span,
         );
       }
     }

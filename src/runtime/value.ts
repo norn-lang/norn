@@ -10,7 +10,7 @@ export type Value =
   | { type: "record"; fields: Record<string, Value> }
   | { type: "closure"; node: string; environment: string }
   | { type: "builtin"; name: string }
-  | { type: "request"; id: string; validators?: Value[] }
+  | { type: "request"; id: string; transforms?: { kind: "validate" | "map"; fn: Value }[] }
   | { type: "source"; kind: "fact" | "stream"; name: string; args: Value[]; labels: Record<string, Value> }
   | { type: "opaque"; library: string; typeName: string; value: Value };
 

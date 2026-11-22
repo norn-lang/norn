@@ -43,3 +43,66 @@ let rec all = requests =>
     let reply = request->wait
     [reply, ...all(rest)]
   }
+
+// Cancels every still-open request in the list (already-settled requests are left untouched).
+let rec cancelAll = requests =>
+  switch requests {
+  | [] => ()
+  | [request, ...rest] =>
+    cancel(request)
+    cancelAll(rest)
+  }
+
+// Waits for every request to settle without short-circuiting on failures, returning all replies in order.
+let allSettled = requests => all(requests)
+
+// Waits for the first request to settle and cancels the remaining open requests.
+let race = requests => {
+  let (winner, reply) = first(requests)
+  cancelAll(requests)
+  (winner, reply)
+}
+
+let rec partitionOpen = (requests, answers) =>
+  switch requests {
+  | [] => ([], answers)
+  | [request, ...rest] =>
+    let (openReqs, acc) = partitionOpen(rest, answers)
+    switch status(request) {
+    | None => ([request, ...openReqs], acc)
+    | Some(Answered(v)) => (openReqs, [v, ...acc])
+    | Some(_) => (openReqs, acc)
+    }
+  }
+
+let rec hasAtLeast = (items, n) =>
+  if n <= 0 { true }
+  else {
+    switch items {
+    | [] => false
+    | [_, ...rest] => hasAtLeast(rest, n - 1)
+    }
+  }
+
+let rec quorumLoop = (requests, needed, answers) => {
+  let (openReqs, nextAnswers) = partitionOpen(requests, answers)
+  if hasAtLeast(nextAnswers, needed) {
+    cancelAll(openReqs)
+    nextAnswers
+  } else {
+    switch openReqs {
+    | [] => nextAnswers
+    | _ =>
+      let (winner, reply) = first(openReqs)
+      cancel(winner)
+      ignore(reply)
+      quorumLoop(openReqs, needed, nextAnswers)
+    }
+  }
+}
+
+// Waits until `~needed` requests return `Answered`, then cancels the remaining open requests and returns the collected answers.
+let quorum = (requests, ~needed) => quorumLoop(requests, needed, [])
+
+// Heterogeneous stream alternation returning `stream<either<'a, 'b>>` (alias for `or`, alongside homogeneous `merge`).
+let orEither = (a, b) => or(a, b)
