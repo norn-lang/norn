@@ -1,3 +1,5 @@
+<img src="playground/favicon.svg" width="72" height="72" alt="The Norn mark: an n whose right leg ends in a knot">
+
 # Norn
 
 **The coordination language for teams of people and AI agents.**
