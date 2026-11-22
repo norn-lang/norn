@@ -215,3 +215,32 @@ test("a 10,000-link chain prints, and nesting deeper than the stack is a clean e
   assert.match(deep.stderr, /^error: the program nests deeper than this implementation's stack can follow at <stdin>:1:\d+\n 1 \| let x = \(/);
   assert.doesNotMatch(deep.stderr, /RangeError|    at /);
 });
+
+test("norn preview compares before and after program texts against a ledger JSON without mutating it", (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "norn-preview-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const beforePath = join(directory, "before.norn");
+  const afterPath = join(directory, "after.norn");
+  const ledgerPath = join(directory, "ledger.json");
+  writeFileSync(beforePath, 'every(1d)->forEach(~key="health", _ => run(@auto, "Check")->wait)\n');
+  writeFileSync(afterPath, 'every(12h)->forEach(~key="health", _ => run(@auto, "Check")->wait)\n');
+  const initialLedger = JSON.stringify({
+    identityScheme: 2, startedAt: 0, requests: {}, entries: {}, facts: {}, occurrences: [], evidence: [], delegations: [], ended: null,
+  });
+  writeFileSync(ledgerPath, initialLedger);
+
+  const jsonRun = norn(["preview", "--json", "--ledger", ledgerPath, "--now", "0", beforePath, afterPath]);
+  assert.equal(jsonRun.status, 0, jsonRun.stderr);
+  const parsed = JSON.parse(jsonRun.stdout);
+  assert.equal(parsed.empty, false);
+  assert.equal(parsed.opened.length, 0);
+  assert.equal(parsed.unreached.length, 0);
+  assert.equal(parsed.loops[0].key, "loop:health");
+  assert.equal(parsed.loops[0].status, "rescheduled");
+  assert.equal(parsed.nextDue.before, 86_400_000);
+  assert.equal(parsed.nextDue.after, 43_200_000);
+
+  const textRun = norn(["preview", "--ledger", ledgerPath, "--now", "0", beforePath, beforePath]);
+  assert.equal(textRun.status, 0, textRun.stderr);
+  assert.match(textRun.stdout, /^preview: empty difference/u);
+});

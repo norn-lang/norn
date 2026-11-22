@@ -7,6 +7,8 @@ export interface Effect {
   name: string; args: Value[]; labels: Record<string, Value>;
   /** On the wait of a `forEach`: the loop begins, or its handler has just finished an occurrence and it continues. */
   loop?: "begins" | "continues";
+  /** Explicit key naming this `forEach` loop inside its enclosing scope, or null when unnamed. */
+  loopKey?: string | null;
 }
 type Control =
   | { kind: "eval"; node: string; env: string }
@@ -30,8 +32,9 @@ type Frame =
   | { kind: "try" }
   | { kind: "return" }
   | { kind: "default"; lambda: string; remaining: string[]; env: string; pattern: string }
-  | { kind: "forEach"; stream: Value; callback: Value; stage: "waiting" | "handling" | "reporting" }
-  | { kind: "through"; steps: Through[] };
+  | { kind: "forEach"; stream: Value; callback: Value; loopKey: string | null; stage: "waiting" | "handling" | "reporting" }
+  | { kind: "through"; steps: Through[] }
+  | { kind: "pureReturn" };
 /** What a stream's value passes through on its way to the program: a function given to `map`, or a constructor around it. */
 export type Through = { fn: Value } | { wrap: string };
 export interface Machine {
@@ -42,7 +45,7 @@ export interface Machine {
   resumedAt: number;
 }
 const effectBuiltins = new Set(["ask", "confirm", "choose", "run", "wait", "waitUntil", "cancel", "handOver", "status", "say", "judge", "first"]);
-const builtins = new Set([...effectBuiltins, "now", "show", "ignore", "fail", "or", "never", "map", "filter", "gather", "forEach", "anyOf"]);
+const builtins = new Set([...effectBuiltins, "now", "show", "ignore", "fail", "or", "never", "map", "filter", "filterMap", "gather", "forEach", "anyOf"]);
 
 export function start(code: Code, now = 0): Machine {
   return { control: { kind: "eval", node: code.root, env: "e0" }, frames: [],
@@ -241,7 +244,7 @@ function builtin(code: Code, machine: Machine, name: string, args: Value[], labe
       if (args.length !== 2 || Object.keys(labels).length || args.some(a => a.type !== "source" || a.kind !== "stream")) throw new Error(`${name} needs two positional streams`);
       value = { type: "source", kind: "stream", name, args, labels }; break;
     }
-    case "map": case "filter": {
+    case "map": case "filter": case "filterMap": {
       if (args.length !== 2 || args[0].type !== "source" || args[0].kind !== "stream" || !["closure", "builtin"].includes(args[1].type)) throw new Error(`${name} needs a stream and function`);
       value = { type: "source", kind: "stream", name, args, labels }; break;
     }
@@ -251,9 +254,12 @@ function builtin(code: Code, machine: Machine, name: string, args: Value[], labe
     }
     case "forEach": {
       if (args.length !== 2 || args[0].type !== "source" || args[0].kind !== "stream") throw new Error("forEach needs a stream and callback");
-      if (Object.keys(labels).length) throw new Error("Concurrent stream handlers are not implemented by the reference machine yet");
-      machine.frames.push({ kind: "forEach", stream: args[0], callback: args[1], stage: "waiting" });
-      machine.control = { kind: "effect", effect: { name: "wait", args: [args[0]], labels: {}, loop: "begins" } }; return;
+      const { key, ...restLabels } = labels;
+      if (Object.keys(restLabels).length) throw new Error("Concurrent stream handlers are not implemented by the reference machine yet");
+      if (key !== undefined && key.type !== "string") throw new Error("forEach ~key must be a string");
+      const loopKey = key ? key.value : null;
+      machine.frames.push({ kind: "forEach", stream: args[0], callback: args[1], loopKey, stage: "waiting" });
+      machine.control = { kind: "effect", effect: { name: "wait", args: [args[0]], labels: {}, loop: "begins", loopKey } }; return;
     }
     default: throw new Error(`Unknown built-in ${name}`);
   }
@@ -391,6 +397,10 @@ function accept(code: Code, machine: Machine, value: Value): void {
       }
       machine.control = { kind: "value", value: passed }; break;
     }
+    case "pureReturn": {
+      machine.control = { kind: "done", value };
+      break;
+    }
     case "forEach": {
       if (frame.stage === "waiting") {
         // After the callback, wait for another occurrence. A unit callback result
@@ -401,7 +411,7 @@ function accept(code: Code, machine: Machine, value: Value): void {
         machine.frames.push({ ...frame, stage: "reporting" });
         machine.control = { kind: "report", outcome: value };
       } else {
-        machine.frames.push({ ...frame, stage: "waiting" }); machine.control = { kind: "effect", effect: { name: "wait", args: [frame.stream], labels: {}, loop: "continues" } };
+        machine.frames.push({ ...frame, stage: "waiting" }); machine.control = { kind: "effect", effect: { name: "wait", args: [frame.stream], labels: {}, loop: "continues", loopKey: frame.loopKey } };
       }
       break;
     }
@@ -444,4 +454,43 @@ export function advance(code: Code, machine: Machine, steps = 1_000): Machine {
     machine.frames = []; machine.environments = {};
   }
   return machine;
+}
+
+/**
+ * Evaluates a pure unary function (`map`, `filter`, `filterMap`) on one value
+ * inside an isolated sub-machine. Any effect or failure is refused so stream
+ * predicates and transforms stay pure and deterministic.
+ */
+export function runPure(code: Code, fn: Value, arg: Value, envSource: Machine, now: number, maxSteps = 100_000): Value {
+  const environments: Machine["environments"] = {};
+  const copyEnv = (id: string): void => {
+    if (environments[id]) return;
+    const entry = envSource.environments[id];
+    if (!entry) throw new Error(`Missing lexical environment ${id}`);
+    environments[id] = { parent: entry.parent, bindings: Object.assign(Object.create(null), entry.bindings) };
+    if (entry.parent) copyEnv(entry.parent);
+    const walk = (v: unknown): void => {
+      if (!v || typeof v !== "object") return;
+      if (Array.isArray(v)) { v.forEach(walk); return; }
+      const item = v as Record<string, unknown>;
+      if (item.type === "closure" && typeof item.environment === "string") copyEnv(item.environment);
+      Object.values(item).forEach(walk);
+    };
+    Object.values(entry.bindings).forEach(walk);
+  };
+  if (fn.type === "closure") copyEnv(fn.environment);
+  const sub: Machine = {
+    control: { kind: "value", value: unit },
+    frames: [{ kind: "pureReturn" }],
+    environments,
+    nextEnvironment: envSource.nextEnvironment,
+    resumedAt: now,
+  };
+  invoke(code, sub, fn, [arg], {});
+  advance(code, sub, maxSteps);
+  if (sub.control.kind === "done") return sub.control.value;
+  if (sub.control.kind === "effect") throw new Error("A function given to map, filter or filterMap may not perform effects");
+  if (sub.control.kind === "error") throw new Error(sub.control.message);
+  if (sub.control.kind === "failed") throw new Error("A function given to map, filter or filterMap cannot fail with a reply");
+  throw new Error("A function given to map, filter or filterMap computed for too long");
 }
