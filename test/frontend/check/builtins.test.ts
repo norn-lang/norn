@@ -142,7 +142,7 @@ test("choose: the options are constructors of one variant type", () => {
 test("the first draft's names are gone, each with a hint that names its replacement", () => {
   assert.equal(message(`let q = request(@alice, "q")->wait\nignore(q)`, "unknown-name"), "unknown name request; request was removed: every verb returns a request; use ask and ->wait");
   assert.equal(message(`let q = start(@alice, "q")->wait\nignore(q)`, "unknown-name"), "unknown name start; start was removed: run returns a request; use run and ->wait");
-  assert.equal(message(`ignore(every(1d)->merge(every(2d)))`, "unknown-name"), "unknown name merge; merge was removed: a->or(b) keeps both values, as First(x) and Second(y)");
+  assert.equal(typeOf(`let mergedStreams = every(1d)->merge(every(2d))`, "mergedStreams"), "stream<time>");
   assert.equal(message(`ignore(Done(1))`, "unknown-constructor"), "unknown constructor Done; Done was removed: a request's answer is Answered(x)");
   assert.equal(
     message(`switch ask(@a, "q")->wait {\n| TimedOut => ()\n| _ => ()\n}`, "unknown-constructor"),

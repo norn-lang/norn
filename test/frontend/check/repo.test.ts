@@ -79,5 +79,13 @@ test("the standard library's types", () => {
     "routine: (string, ~key: string=?, ~every: duration, ~from: time, ~on: stream<'a>=?, ~who: participant=?, ~otherwise: participant, ~by: duration=?) => 'b",
     "digest: ('a, ~every: duration) => 'b",
     "all: (list<(event|stream|request)<'a>>) => list<'a>",
+    "cancelAll: (list<request<'a>>) => unit",
+    "allSettled: (list<(event|stream|request)<'a>>) => list<'a>",
+    "race: (list<request<'a>>) => (request<'a>, reply<'a>)",
+    "partitionOpen: (list<request<'a>>, list<'a>) => (list<request<'a>>, list<'a>)",
+    "hasAtLeast: (list<'a>, int) => bool",
+    "quorumLoop: (list<request<'a>>, int, list<'a>) => list<'a>",
+    "quorum: (list<request<'a>>, ~needed: int) => list<'a>",
+    "orEither: (stream<'a>, stream<'b>) => stream<either<'a, 'b>>",
   ]);
 });

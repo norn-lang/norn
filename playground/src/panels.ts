@@ -18,6 +18,7 @@ const FAMILY_WORDS: Record<Family, string> = {
   cancel: "calls a request off",
   say: "posts a message",
   judge: "asks the host’s judge whether a condition holds",
+  spawn: "starts a scoped concurrent sub-task",
 };
 
 export interface Panels {

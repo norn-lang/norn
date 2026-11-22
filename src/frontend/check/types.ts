@@ -302,6 +302,7 @@ export function inFiniteClass(cls: FiniteClass, type: Type): boolean {
   const resolved = resolve(type);
   if (resolved.tag !== "con") return false;
   if (cls === "handled") return resolved.name === "reply" || resolved.name === "unit";
+  if (cls === "addressee" && isRequest(resolved)) return true;
   return resolved.args.length === 0 && MEMBERS[cls].includes(resolved.name);
 }
 

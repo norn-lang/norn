@@ -12,7 +12,7 @@ import {
 } from "./types.ts";
 
 /** The effect families of docs/types.md §8, in the order the effects summary lists them. */
-export const FAMILIES = ["ask", "confirm", "choose", "run", "wait", "handOver", "cancel", "say", "judge"] as const;
+export const FAMILIES = ["ask", "confirm", "choose", "run", "wait", "handOver", "cancel", "say", "judge", "spawn"] as const;
 export type Family = (typeof FAMILIES)[number];
 
 export const BASE_TYPES = ["string", "int", "float", "bool", "unit", "time", "duration", "participant", "ref", "json"] as const;
@@ -36,8 +36,12 @@ export const t = {
   either: (first: Type, second: Type) => con("either", first, second),
   event: (element: Type) => source(FACT, element),
   fact: (element: Type) => source(FACT, element),
+  once: (element: Type) => source(FACT, element),
   stream: (element: Type) => source(OCCURRENCE, element),
   request: (answer: Type) => requestOf(answer),
+  eachStrategy: con("eachStrategy"),
+  admission: con("admission"),
+  timedValue: (element: Type) => con("timedValue", element),
 };
 
 const param = (index: number, name: string): TParam => ({ tag: "param", index, name });
@@ -58,10 +62,26 @@ export function builtinTable(): TypeTable {
   variant("reply", ["a"], [["Answered", [a]], ["Refused", [t.string]], ["NoReply", []], ["Broke", [t.string]], ["Cancelled", []], ["Revoked", []]]);
   variant("yesno", [], [["Yes", []], ["No", []]]);
   variant("either", ["a", "b"], [["First", [a]], ["Second", [param(1, "b")]]]);
+  variant("eachStrategy", [], [["Queue", []], ["Latest", []], ["Restart", []], ["Together", []], ["Batch", []]]);
+  variant("admission", [], [["Allow", []], ["Deny", [t.string]], ["AlsoAsk", [t.participant]]]);
+  const timedRecord = typeInfo({
+    name: "timedValue",
+    kind: "record",
+    origin: "builtin",
+    params: ["a"],
+    fields: [
+      { name: "at", type: t.time, decl: null },
+      { name: "value", type: a, decl: null },
+    ],
+    equality: { never: false, params: new Set([0]) },
+  });
+  table.types.set("timedValue", timedRecord);
+  table.records.push(timedRecord);
   const sourceName = (name: string, kind: Type): TypeInfo =>
     typeInfo({ name, kind: "source", origin: "builtin", params: ["a"], sourceKind: kind, equality: { never: false, params: new Set([0]) } });
   table.types.set("event", sourceName("event", FACT));
   table.types.set("fact", sourceName("fact", FACT));
+  table.types.set("once", sourceName("once", FACT));
   table.types.set("stream", sourceName("stream", OCCURRENCE));
   table.types.set("request", sourceName("request", REQUEST));
   // Standard capability interface `Events` built-in types: `Events.kind<'a>` and `Events.envelope<'a>`.
@@ -143,12 +163,19 @@ export function builtinValues(): Builtin[] {
       return fun([t.list(t.request(a))], [], tuple([t.request(a), t.reply(a)]));
     }],
     // Offered to all of them; whoever takes it first holds it, and nobody else does.
-    ["anyOf", null, () => fun([t.list(t.participant)], [optional("except", t.participant)], t.participant)],
+    // `~except` accepts either a participant or a request handle (separation of duties).
+    ["anyOf", null, () => fun([t.list(t.participant)], [optional("except", g())], t.participant)],
+    // Resolves to whoever holds or answered a prior request (continuity of ownership).
+    ["sameAs", null, () => fun([t.request(g())], [], t.participant)],
     ["cancel", "cancel", () => fun([t.request(g())], [], t.unit)],
     ["status", null, () => {
       const a = g();
       return fun([t.request(a)], [], t.option(t.reply(a)));
     }],
+    // Optional implicit `taken` fact: resolves once a request is taken, started by an Agent, or answered.
+    ["taken", null, () => fun([t.request(g())], [], t.once(t.time))],
+    // Per-request free-text notes stream (`say(r, text)` appends to `r->notes`).
+    ["notes", null, () => fun([t.request(g())], [], t.stream(t.string))],
     ["say", "say", () => fun([g("addressee"), t.string], [], t.unit)],
     ["now", null, () => fun([], [], t.time)],
     ["show", null, () => fun([g()], [], t.string)],
@@ -163,10 +190,21 @@ export function builtinValues(): Builtin[] {
       const b = g();
       return fun([t.stream(a), t.stream(b)], [], t.stream(t.either(a, b)));
     }],
+    // Homogeneous stream merge: satisfies `s->merge(never()) == s` and strict associativity.
+    ["merge", null, () => {
+      const a = g();
+      return fun([t.stream(a), t.stream(a)], [], t.stream(a));
+    }],
     ["map", null, () => {
       const a = g();
       const b = g();
       return fun([t.stream(a), fun([a], [], b)], [], t.stream(b));
+    }],
+    // Maps a request's answer while preserving its cancellable `request<'b>` handle.
+    ["mapRequest", null, () => {
+      const a = g();
+      const b = g();
+      return fun([t.request(a), fun([a], [], b)], [], t.request(b));
     }],
     ["filter", null, () => {
       const a = g();
@@ -177,9 +215,29 @@ export function builtinValues(): Builtin[] {
       const b = g();
       return fun([t.stream(a), fun([a], [], t.option(b))], [], t.stream(b));
     }],
+    // Pure stateful stream accumulator: may stay silent (`None`) or emit (`Some(b)`).
+    ["scan", null, () => {
+      const a = g(), s = g(), b = g();
+      return fun([t.stream(a), s, fun([s, a], [], tuple([s, t.option(b)]))], [], t.stream(b));
+    }],
+    // Exposes each occurrence's timestamp alongside its value.
+    ["timed", null, () => {
+      const a = g();
+      return fun([t.stream(a)], [], t.stream(t.timedValue(a)));
+    }],
     ["gather", null, () => {
       const a = g();
       return fun([t.stream(a)], [], t.stream(t.list(a)));
+    }],
+    // Structured concurrency: scoped child task whose open requests cancel automatically when it ends.
+    ["spawn", "spawn", () => {
+      const a = g();
+      return fun([fun([], [], a)], [optional("key", t.string)], t.request(a));
+    }],
+    // Policy scope: clamps every request's `~by` opened inside `f()` to `min(req.~by, scopeDeadline)`.
+    ["within", null, () => {
+      const a = g();
+      return fun([g("deadline"), fun([], [], a)], [], a);
     }],
     // Request-level pure value validator: keeps request identity, rejects invalid answers with structured path errors.
     ["accepting", null, () => {
@@ -190,7 +248,11 @@ export function builtinValues(): Builtin[] {
     // forEach waits for each occurrence, so it counts as the wait family.
     ["forEach", "wait", () => {
       const a = g();
-      return fun([t.stream(a), fun([a], [], g("handled"))], [optional("key", t.string)], g());
+      return fun(
+        [t.stream(a), fun([a], [], g("handled"))],
+        [optional("key", t.string), optional("each", t.eachStrategy), optional("per", fun([a], [], t.string))],
+        g(),
+      );
     }],
   ];
   return values.map(([name, family, type]) => ({ name, family, type: type() }));

@@ -115,9 +115,9 @@ test("a request's deadline survives a disk restart without an active waiter", ()
 test("program errors remain errors; every open request ends Cancelled, and the author is told", () => {
   const cases = [
     ["1 / 0", "Division by zero"], ["missing", "Unbound name missing"], ["fail(Answered(1))", "fail requires a reply other than Answered"],
-    ['ask(@alice, "q", ~until=1h)', "Unknown ask label until"], ['say(@alice, 1)', "say needs a participant or a reference, and text"],
+    ['ask(@alice, "q", ~until=1h)', "Unknown ask label until"], ['say(@alice, 1)', "say needs a participant, a reference or a request, and text"],
     ['after(0h)->wait', "A relative timer needs a positive duration"], ["status(1)", "status needs a request of this program"],
-    ['ciFailed("acme/api")->forEach(~concurrent=2, x => ())', "Concurrent stream handlers are not implemented by the reference machine yet"],
+    ['ciFailed("acme/api")->forEach(~concurrent=2, x => ())', "Unknown forEach label concurrent"],
   ] as const;
   for (const [expression, message] of cases) {
     const { team, pass } = started(`let q = ask(@alice, "Outstanding")\n${expression}`);

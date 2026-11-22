@@ -4,7 +4,7 @@
 import type { ReportForm } from "../frontend/check/forms.ts";
 import type { Code } from "./code.ts";
 import { mismatch, mismatchAll, type FormPathError } from "./form.ts";
-import { advance, resume, resumeThrough, runPure, start, type Effect, type Through } from "./machine.ts";
+import { advance, resume, resumeThrough, runPure, runPureArgs, start, startClosure, type Effect, type Machine, type Through } from "./machine.ts";
 import { sha256 } from "./sha256.ts";
 import { equal, eventKey, show, text, unit, variant, type Json, type Value } from "./value.ts";
 
@@ -26,6 +26,22 @@ export interface LedgerRequest {
   holder: string;
   /** For a request offered to a group with `anyOf`: who may take it. Null once taken, and for a request to one participant. */
   candidates: string[] | null;
+  /** Original candidate pool when offered via `anyOf`, retained so `release()` can return the request to the group. */
+  initialCandidates?: string[] | null;
+  /** Original group holder string (e.g. `anyOf([...])`) retained for `release()`. */
+  initialGroupHolder?: string | null;
+  /** Timestamp when a participant took or started the request (or answered it directly); backs `taken(r)`. */
+  takenAt?: number | null;
+  /** IDs of sub-requests opened with `~about=thisRequest` (visible dependency tracking). */
+  waitingOn?: string[];
+  /** Explicit host-recorded delivery failure (never silently collapsed into `NoReply`). */
+  undelivered?: { at: number; reason: string } | null;
+  /** Provenance: who/which scope opened this request. */
+  openedBy?: string;
+  /** For a `spawn` child task handle: the scope prefix owned by this child task. */
+  spawnScope?: string | null;
+  /** If opened inside a `spawn` child task, the parent `spawn` request ID (auto-cancelled when that task ends). */
+  spawnOwner?: string | null;
   /**
    * Who may never hold the request: the `~except` of the group it was offered
    * to. It stays after one of the group takes the request, and the holder
@@ -92,6 +108,8 @@ export interface Ledger {
   seenEvents?: Record<string, number>;
   /** Structured path errors recorded when an incoming CloudEvent payload failed form validation. */
   eventErrors?: { at: number; app: string; kind: string; source: string; id: string; errors: FormPathError[] }[];
+  /** Per-request free-text notes appended by `say(r, text)` or `addNote()`, feeding `r->notes`. */
+  requestNotes?: Record<string, { at: number; author: string; text: string }[]>;
   /** The program's result, recorded once with the cancellation of what it left open. A later pass returns it and evaluates nothing. */
   ended: { at: number; status: "completed" | "failed"; result: Value | null; error: string | null } | null;
 }
@@ -204,7 +222,11 @@ type Source = Extract<Value, { type: "source" }>;
 /** The `First`/`Second` constructors an `or` puts around a value, outermost first. */
 type Path = ("First" | "Second")[];
 /** One pure transformation or predicate step on a stream occurrence, innermost first. */
-type StreamOp = { kind: "map" | "filter" | "filterMap"; fn: Value } | { kind: "wrap"; side: "First" | "Second" };
+type StreamOp =
+  | { kind: "map" | "filter" | "filterMap"; fn: Value }
+  | { kind: "wrap"; side: "First" | "Second" }
+  | { kind: "timed" }
+  | { kind: "scan"; initial: Value; fn: Value; stateKey: string };
 /** One thing a wait is for. */
 export type Target =
   | { kind: "request"; id: string }
@@ -287,6 +309,8 @@ export interface PassOptions {
    * ends the program `Revoked`. Left out, the host vouches for the whole pass.
    */
   authorize?: (effect: Effect) => boolean;
+  /** Optional provenance label recorded as `openedBy` on newly opened requests. */
+  openedBy?: string;
 }
 
 /** The program's own mistake, found at an effect: it ends the program as a program failure and is never a reply. */
@@ -295,7 +319,7 @@ class ProgramError extends Error {}
 const VERBS = ["ask", "confirm", "choose", "run", "judge"];
 const LABELS: Record<string, string[]> = {
   ask: ["by", "about"], confirm: ["by", "about"], choose: ["by", "about"], run: ["context", "by", "about", "form"], judge: ["about"],
-  wait: [], waitUntil: [], cancel: [], handOver: [], status: [], say: [], first: [],
+  wait: [], waitUntil: [], cancel: [], handOver: [], status: [], say: [], first: [], sameAs: [], spawn: ["key"], withinEnter: [], withinExit: [],
 };
 
 const replyValue = (reply: Reply): Value =>
@@ -359,6 +383,7 @@ export function settle(ledger: Ledger, id: string, holder: string, reply: Reply,
     request.holder = delegator; request.delegatedBy = null; request.epoch++;
     return false;
   }
+  if (reply.tag === "Answered" && request.takenAt == null) request.takenAt = now;
   request.reply = reply; request.settledAt = now;
   return true;
 }
@@ -437,21 +462,145 @@ export function take(ledger: Ledger, id: string, taker: string, now: number): bo
   settleDue(ledger, now);
   const request = ledger.requests[id];
   if (!request || request.reply !== null || !request.candidates?.includes(taker)) return false;
-  request.holder = taker; request.candidates = null; request.epoch++;
+  if (request.initialCandidates === undefined) request.initialCandidates = [...request.candidates];
+  if (request.initialGroupHolder === undefined) request.initialGroupHolder = request.holder;
+  request.holder = taker; request.candidates = null; request.takenAt ??= now; request.epoch++;
   return true;
 }
+
+/**
+ * Records that a single-participant or Agent request was picked up / started,
+ * establishing the implicit `taken(r)` fact without settling the request.
+ */
+export function markTaken(ledger: Ledger, id: string, now: number): boolean {
+  settleDue(ledger, now);
+  const request = ledger.requests[id];
+  if (!request || request.reply !== null) return false;
+  if (request.takenAt == null) request.takenAt = now;
+  return true;
+}
+
+/**
+ * Releases a previously taken group request back to its candidate pool so
+ * another group member can take it under a new epoch.
+ */
+export function release(
+  ledger: Ledger,
+  id: string,
+  holder: string,
+  now: number,
+  options: { epoch?: number; candidates?: string[]; reason?: string } = {},
+): string | null {
+  settleDue(ledger, now);
+  const request = ledger.requests[id];
+  const pool = options.candidates ?? request?.initialCandidates ?? null;
+  const refusal = !request ? "No such request"
+    : request.reply !== null ? "The request has already ended"
+    : request.candidates?.length ? "Nobody of the group has taken the request yet"
+    : request.holder !== holder || (options.epoch !== undefined && options.epoch !== request.epoch) ? "Not the request's holder"
+    : !pool?.length ? "Only a group request offered with anyOf can be released back to the pool"
+    : null;
+  if (refusal !== null) return refusal;
+  const groupHolder = request.initialGroupHolder ?? `anyOf([${pool!.join(", ")}])`;
+  (ledger.delegations ??= []).push({ request: id, at: now, kind: "returned", from: holder, to: groupHolder, reason: options.reason ?? null });
+  request.holder = groupHolder;
+  request.candidates = [...pool!];
+  request.delegatedBy = null;
+  request.takenAt = null;
+  request.epoch++;
+  return null;
+}
+
+/** Records an explicit host delivery failure on an open request without collapsing it into `NoReply`. */
+export function markUndelivered(ledger: Ledger, id: string, reason: string, now: number): boolean {
+  settleDue(ledger, now);
+  const request = ledger.requests[id];
+  if (!request || request.reply !== null) return false;
+  request.undelivered = { at: now, reason };
+  return true;
+}
+
+/** Appends a free-text note to a request (backing `say(r, text)` and `r->notes`); never settles or extends `~by`. */
+export function addNote(ledger: Ledger, id: string, author: string, body: string, now: number): boolean {
+  const request = ledger.requests[id];
+  if (!request) return false;
+  ((ledger.requestNotes ??= {})[id] ??= []).push({ at: now, author, text: body });
+  const notesSource: Value = { type: "source", kind: "stream", name: "notes", args: [{ type: "request", id }], labels: {} };
+  ledger.occurrences.push({ key: eventKey(notesSource), at: now, value: text(body) });
+  return true;
+}
+
+/** Result of evaluating a pure Norn admission policy (`request => Allow | Deny(string) | AlsoAsk(participant)`). */
+export type AdmissionDecision =
+  | { decision: "Allow" }
+  | { decision: "Deny"; reason: string }
+  | { decision: "AlsoAsk"; participant: string };
+
+/**
+ * Evaluates a pure Norn admission policy program (returning a function
+ * `requestInfo => Allow | Deny(string) | AlsoAsk(participant)`) against a
+ * request record before dispatching it.
+ */
+export function evaluateAdmissionPolicy(policyCode: Code, request: LedgerRequest, now: number): AdmissionDecision {
+  const machine = start(policyCode, now);
+  advance(policyCode, machine, 100_000);
+  if (machine.control.kind !== "done") {
+    throw new Error(machine.control.kind === "error" ? machine.control.message : "Admission policy must evaluate purely to a function");
+  }
+  const fn = machine.control.value;
+  if (fn.type !== "closure" && fn.type !== "builtin") {
+    throw new Error("Admission policy must evaluate to a function");
+  }
+  const reqVal: Value = {
+    type: "record",
+    fields: {
+      id: text(request.id),
+      verb: text(request.verb),
+      holder: text(request.holder),
+      text: text(request.text),
+      about: request.about != null ? variant("Some", text(request.about)) : variant("None"),
+      context: request.context != null ? variant("Some", text(request.context)) : variant("None"),
+      openedBy: text(request.openedBy ?? "program"),
+    },
+  };
+  const verdict = runPure(policyCode, fn, reqVal, machine, now);
+  if (verdict.type === "variant" && verdict.name === "Allow" && verdict.args.length === 0) {
+    return { decision: "Allow" };
+  }
+  if (verdict.type === "variant" && verdict.name === "Deny" && verdict.args.length === 1 && verdict.args[0]!.type === "string") {
+    return { decision: "Deny", reason: verdict.args[0]!.value };
+  }
+  if (verdict.type === "variant" && verdict.name === "AlsoAsk" && verdict.args.length === 1 && verdict.args[0]!.type === "participant") {
+    return { decision: "AlsoAsk", participant: show(verdict.args[0]!) };
+  }
+  throw new Error(`Admission policy returned invalid value: ${show(verdict)}`);
+}
+
 function conditionsOf(who: Value | undefined): Record<string, string> {
   if (who?.type !== "participant" || who.name === "anyOf") return {};
   return Object.fromEntries(Object.entries(who.labels).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([label, value]) => [label, show(value)]));
 }
-/** Who a group leaves out with `~except`: nobody may hold the request, by taking it or by delegation. */
-function excludedOf(who: Value | undefined): string[] {
-  return who?.type === "participant" && who.name === "anyOf" && who.labels.except ? [show(who.labels.except)] : [];
+function resolveExceptParticipant(except: Value | undefined, ledger?: Ledger): string | null {
+  if (!except) return null;
+  if (except.type === "participant") return show(except);
+  if (except.type === "request" && ledger) {
+    const req = ledger.requests[except.id];
+    if (!req) throw new ProgramError("anyOf ~except request does not exist in this program");
+    if (req.candidates?.length) return null;
+    return req.holder;
+  }
+  return show(except);
 }
-function candidatesOf(who: Value): string[] | null {
+/** Who a group leaves out with `~except`: nobody may hold the request, by taking it or by delegation. */
+function excludedOf(who: Value | undefined, ledger?: Ledger): string[] {
+  if (who?.type !== "participant" || who.name !== "anyOf" || !who.labels.except) return [];
+  const excluded = resolveExceptParticipant(who.labels.except, ledger);
+  return excluded ? [excluded] : [];
+}
+function candidatesOf(who: Value, ledger?: Ledger): string[] | null {
   if (who.type !== "participant" || who.name !== "anyOf") return null;
-  const except = who.labels.except ? show(who.labels.except) : null;
-  const group = (who.labels.of as Extract<Value, { type: "list" | "tuple" }>).values.map(show).filter(name => name !== except);
+  const except = resolveExceptParticipant(who.labels.except, ledger);
+  const group = (who.labels.of as Extract<Value, { type: "list" | "tuple" }>).values.map(show).filter(name => except === null || !excludes(except, name));
   if (!group.length) throw new ProgramError("anyOf leaves nobody to take the request");
   return [...new Set(group)];
 }
@@ -476,37 +625,52 @@ export function occur(ledger: Ledger, stream: Value, value: Value, now: number):
 }
 
 /** Streams the language makes from others, or from the clock: nothing occurs on one of these by a host's word. */
-const COMPOSED = ["or", "never", "after", "every", "map", "filter", "filterMap", "gather"];
-/** The host's streams under a stream a program composed, in the order `or` gives them. */
+const COMPOSED = ["or", "merge", "never", "after", "every", "map", "filter", "filterMap", "scan", "timed", "gather", "taken", "notes"];
+/** The host's streams under a stream a program composed, in the order `or`/`merge` gives them. */
 function hostStreams(stream: Value): Source[] {
   if (stream.type !== "source" || stream.kind !== "stream") return [];
-  if (stream.name === "or" || stream.name === "map" || stream.name === "filter" || stream.name === "filterMap" || stream.name === "gather") {
+  if (stream.name === "or" || stream.name === "merge" || stream.name === "map" || stream.name === "filter" || stream.name === "filterMap" || stream.name === "scan" || stream.name === "timed" || stream.name === "gather") {
     return stream.args.flatMap(hostStreams);
   }
   return COMPOSED.includes(stream.name) ? [] : [stream];
 }
 
 /**
- * Strips pure functions (`map`/`filter`/`filterMap`) and `or` operand order
+ * Strips pure functions (`map`/`filter`/`filterMap`/`scan`) and `or`/`merge` operand order
  * from a source descriptor so wait identity never depends on closure AST
  * positions or operand ordering.
  */
 function stripSourceFunctions(value: Value): unknown {
   if (value.type === "request") return { type: "request", id: value.id };
   if (value.type !== "source") return value;
-  if (value.name === "map" || value.name === "filter" || value.name === "filterMap") {
+  if (value.name === "map" || value.name === "filter" || value.name === "filterMap" || value.name === "timed") {
     return stripSourceFunctions(value.args[0]);
+  }
+  if (value.name === "scan") {
+    return { type: "source", kind: value.kind, name: "scan", of: stripSourceFunctions(value.args[0]), initial: value.args[1] };
   }
   if (value.name === "or") {
     const parts = [stripSourceFunctions(value.args[0]), stripSourceFunctions(value.args[1])];
     const keys = parts.map(part => eventKey(part as Value)).sort();
     return { type: "source", kind: value.kind, name: "or", parts: keys };
   }
+  if (value.name === "merge") {
+    const flattenMerge = (v: Value): unknown[] => {
+      if (v.type === "source" && v.name === "never") return [];
+      if (v.type === "source" && v.name === "merge") return [...flattenMerge(v.args[0]), ...flattenMerge(v.args[1])];
+      return [stripSourceFunctions(v)];
+    };
+    const parts = flattenMerge(value);
+    if (parts.length === 0) return { type: "source", kind: "stream", name: "never", args: [], labels: {} };
+    if (parts.length === 1) return parts[0];
+    const keys = parts.map(part => eventKey(part as Value)).sort();
+    return { type: "source", kind: value.kind, name: "merge", parts: keys };
+  }
   if (value.name === "gather") return { type: "source", kind: value.kind, name: "gather", of: stripSourceFunctions(value.args[0]) };
   return value;
 }
 
-/** What a wait is for, with `or` flattened left to right and each leaf's pure stream ops preserved innermost-first. */
+/** What a wait is for, with `or`/`merge` flattened left to right and each leaf's pure stream ops preserved innermost-first. */
 function detailedTargetsOf(ledger: Ledger, waited: Value, began: number): DetailedTarget[] {
   const results: DetailedTarget[] = [];
   const pending: { source: Value; path: Path; ops: StreamOp[]; gathered?: true }[] = [{ source: waited, path: [], ops: [] }];
@@ -521,8 +685,18 @@ function detailedTargetsOf(ledger: Ledger, waited: Value, began: number): Detail
         { source: source.args[1], path: [...path, "Second"], ops: [{ kind: "wrap", side: "Second" }, ...ops] },
         { source: source.args[0], path: [...path, "First"], ops: [{ kind: "wrap", side: "First" }, ...ops] },
       );
+    } else if (source.name === "merge") {
+      pending.push(
+        { source: source.args[1], path, ops, gathered },
+        { source: source.args[0], path, ops, gathered },
+      );
     } else if (source.name === "map" || source.name === "filter" || source.name === "filterMap") {
       pending.push({ source: source.args[0], path, ops: [{ kind: source.name, fn: source.args[1] }, ...ops], gathered });
+    } else if (source.name === "timed") {
+      pending.push({ source: source.args[0], path, ops: [{ kind: "timed" }, ...ops], gathered });
+    } else if (source.name === "scan") {
+      const stateKey = sha256(eventKey(stripSourceFunctions(source) as Value)).slice(0, 12);
+      pending.push({ source: source.args[0], path, ops: [{ kind: "scan", initial: source.args[1], fn: source.args[2], stateKey }, ...ops], gathered });
     } else if (source.name === "gather") {
       const [of] = source.args;
       if (of?.type !== "source" || of.kind !== "stream" || COMPOSED.includes(of.name)) throw new ProgramError("gather takes a stream of the host, as in ciFailed(\"acme/api\")->gather");
@@ -558,15 +732,25 @@ function timerSpecOf(detailed: DetailedTarget[]): string {
 }
 
 function hasFilterOp(detailed: DetailedTarget[]): boolean {
-  return detailed.some(item => item.ops.some(op => op.kind === "filter" || op.kind === "filterMap"));
+  return detailed.some(item => item.ops.some(op => op.kind === "filter" || op.kind === "filterMap" || op.kind === "scan" || op.kind === "timed"));
 }
 
-/** Applies a leaf target's pure `map`/`filter`/`filterMap`/`wrap` pipeline. Returns null when filtered out. */
-function applyOps(code: Code, machine: ReturnType<typeof start>, rawValue: Value, ops: StreamOp[], now: number): Value | null {
+/** Applies a leaf target's pure `map`/`filter`/`filterMap`/`scan`/`timed`/`wrap` pipeline. Returns null when filtered out. */
+function applyOps(
+  code: Code,
+  machine: Machine,
+  rawValue: Value,
+  ops: StreamOp[],
+  now: number,
+  occurrenceAt: number,
+  scanStates?: Map<string, Value>,
+): Value | null {
   let current = rawValue;
   for (const op of ops) {
     if (op.kind === "wrap") {
       current = variant(op.side, current);
+    } else if (op.kind === "timed") {
+      current = { type: "record", fields: { at: { type: "time", value: String(occurrenceAt) }, value: current } };
     } else if (op.kind === "map") {
       try { current = runPure(code, op.fn, current, machine, now); } catch (error) {
         throw new ProgramError(error instanceof Error ? error.message : String(error));
@@ -588,6 +772,22 @@ function applyOps(code: Code, machine: ReturnType<typeof start>, rawValue: Value
       }
       if (mapped.name === "None") return null;
       current = mapped.args[0];
+    } else if (op.kind === "scan") {
+      const prevState = scanStates?.get(op.stateKey) ?? op.initial;
+      let pair: Value;
+      try { pair = runPureArgs(code, op.fn, [prevState, current], machine, now); } catch (error) {
+        throw new ProgramError(error instanceof Error ? error.message : String(error));
+      }
+      if (pair.type !== "tuple" || pair.values.length !== 2) {
+        throw new ProgramError("scan reducer must return (nextState, option<out>)");
+      }
+      const [nextState, emitted] = pair.values;
+      scanStates?.set(op.stateKey, nextState);
+      if (emitted.type !== "variant" || (emitted.name !== "None" && (emitted.name !== "Some" || emitted.args.length !== 1))) {
+        throw new ProgramError("scan reducer must return (nextState, Some(value) | None)");
+      }
+      if (emitted.name === "None") return null;
+      current = emitted.args[0];
     }
   }
   return current;
@@ -696,7 +896,72 @@ export function* slices(code: Code, source: Ledger, now: number, options: PassOp
   // Scoped counters (v2) or flat counters (v1).
   const scopeStack: string[] = [];
   const activeLoopStack: { storageKey: string; displayKey: string }[] = [];
+  const deadlineStack: number[] = [];
+  const spawnOwnerStack: string[] = [];
   const currentScope = (): string => scopeStack.at(-1) ?? "root";
+  const currentSpawnOwner = (): string | null => spawnOwnerStack.at(-1) ?? null;
+  const clampBy = (rawBy: number | null): number | null => {
+    const cap = deadlineStack.at(-1);
+    if (cap === undefined) return rawBy;
+    return rawBy === null ? cap : Math.min(rawBy, cap);
+  };
+  const cancelSpawnChildren = (spawnId: string): void => {
+    for (const req of Object.values(ledger.requests)) {
+      if (req.reply === null && req.spawnOwner === spawnId) {
+        close(req, { tag: "Cancelled" }, now);
+        if (req.verb === "spawn") cancelSpawnChildren(req.id);
+      }
+    }
+  };
+  const loadScanStates = (scopeKey: string): Map<string, Value> => {
+    const map = new Map<string, Value>();
+    const raw = ledger.entries[`scan:${scopeKey}`]?.value as unknown as Record<string, Value> | undefined;
+    if (raw && typeof raw === "object") {
+      for (const [k, v] of Object.entries(raw)) map.set(k, v);
+    }
+    return map;
+  };
+  const saveScanStates = (scopeKey: string, map: Map<string, Value>): void => {
+    if (map.size === 0) return;
+    ledger.entries[`scan:${scopeKey}`] = { at: now, value: Object.fromEntries(map) as unknown as Json };
+  };
+  const applyRequestTransforms = (
+    activeMachine: Machine,
+    reqVal: Value,
+    request: LedgerRequest,
+    rawReply: Reply,
+  ): { ok: true; reply: Reply } | { ok: false; reason: string } => {
+    const transforms = reqVal.type === "request" ? (reqVal.transforms ?? []) : [];
+    if (rawReply.tag !== "Answered" || transforms.length === 0) return { ok: true, reply: rawReply };
+    let currentVal = rawReply.value;
+    for (const tr of transforms) {
+      let res: Value;
+      try {
+        res = runPure(code, tr.fn, currentVal, activeMachine, now);
+      } catch (err) {
+        throw new ProgramError(err instanceof Error ? err.message : String(err));
+      }
+      if (tr.kind === "validate") {
+        if (res.type === "variant" && res.name === "Ok" && res.args.length === 1) {
+          currentVal = res.args[0]!;
+        } else if (res.type === "variant" && res.name === "Error" && res.args.length === 1 && res.args[0]!.type === "string") {
+          const reason = res.args[0]!.value;
+          const errItem: FormPathError = { path: "$", expected: "accepted value", found: show(rawReply.value) };
+          ledger.evidence.push({ request: request.id, holder: request.holder, at: now, reply: rawReply, reason });
+          (pass.validationErrors ??= []).push({ id: request.id, reason, errors: [errItem] });
+          request.reply = null;
+          request.settledAt = null;
+          if (request.by !== null) due(request.by);
+          return { ok: false, reason };
+        } else {
+          throw new ProgramError("accepting validator must return Ok(value) or Error(string)");
+        }
+      } else {
+        currentVal = res;
+      }
+    }
+    return { ok: true, reply: { tag: "Answered", value: currentVal } };
+  };
   const scopeSeen = new Map<string, Map<string, number>>();
   const loopsUsedInScope = new Map<string, Set<string>>();
   const seenIn = (scope: string): Map<string, number> => {
@@ -762,6 +1027,7 @@ export function* slices(code: Code, source: Ledger, now: number, options: PassOp
   };
 
   const machine = start(code, ledger.startedAt);
+  let activeMachine: Machine = machine;
   let lastWaitEvaluated = false;
 
   /** Answers one effect from the ledger, recording it first when it is new. Null: the pass stops here, waiting or ended. */
@@ -772,6 +1038,74 @@ export function* slices(code: Code, source: Ledger, now: number, options: PassOp
     // Authority is asked only for what the ledger does not hold yet: what is recorded has happened.
     const permitted = (): boolean => options.authorize?.(effect) ?? true;
     const revoked = (): null => end("failed", variant("Revoked"), null);
+
+    if (name === "withinEnter") {
+      const limit = instant(args[0], now);
+      if (limit === null) throw new ProgramError("within needs a deadline");
+      const effective = deadlineStack.length ? Math.min(deadlineStack.at(-1)!, limit) : limit;
+      deadlineStack.push(effective);
+      return { value: unit, at: now };
+    }
+    if (name === "withinExit") {
+      deadlineStack.pop();
+      return { value: unit, at: now };
+    }
+    if (name === "sameAs") {
+      if (args.length !== 1) throw new ProgramError("sameAs needs one request");
+      const req = handle("sameAs", args[0]);
+      if (req.candidates?.length) throw new ProgramError("sameAs needs a request with a resolved single holder");
+      const match = /^@([A-Za-z_][A-Za-z0-9_-]*)(?::([0-9]+))?$/u.exec(req.holder);
+      if (!match) throw new ProgramError(`Cannot resolve single participant from ${req.holder}`);
+      return { value: { type: "participant", name: match[1]!, instance: match[2] ?? null, labels: {} }, at: now };
+    }
+    if (name === "spawn") {
+      if (args.length !== 1 || !["closure", "builtin"].includes(args[0].type)) throw new ProgramError("spawn needs a zero-argument function");
+      if (labels.key !== undefined && labels.key.type !== "string") throw new ProgramError("spawn ~key must be a string");
+      const spawnLabel = labels.key ? labels.key.value : "$spawn";
+      const address = identity("spawn", { key: spawnLabel });
+      const resolvedAddress = v2 ? resolveAddress(address, ledger.moves) : address;
+      let childReq = v2 ? byAddress.get(resolvedAddress) : ledger.requests[address];
+      if (!childReq) {
+        if (!permitted()) return revoked();
+        const id = v2 ? nextUniqueRequestId(resolvedAddress) : address;
+        const childScope = currentScope() === "root" ? `spawn:${id}` : `${currentScope()}/spawn:${id}`;
+        childReq = ledger.requests[id] = {
+          id, ...(v2 ? { address: resolvedAddress } : {}), verb: "spawn", holder: "@spawn", candidates: null, excluded: [],
+          delegatedBy: null, epoch: 0, text: spawnLabel, conditions: {}, about: null, context: null, options: null, form: null,
+          by: clampBy(null), openedAt: now, reply: null, settledAt: null, detached: false,
+          openedBy: options.openedBy ?? currentScope(), spawnScope: childScope, spawnOwner: currentSpawnOwner(),
+        };
+        if (v2) byAddress.set(resolvedAddress, childReq);
+        log.push({ kind: "opened", request: { ...childReq } });
+      } else if (childReq.reply === null) {
+        childReq.detached = false;
+      }
+      reached.add(childReq.id);
+      if (childReq.reply === null) {
+        const prevMachine = activeMachine;
+        const childMachine = startClosure(code, args[0], [], prevMachine, now);
+        scopeStack.push(childReq.spawnScope ?? `spawn:${childReq.id}`);
+        spawnOwnerStack.push(childReq.id);
+        activeMachine = childMachine;
+        const childOutcome = driveMachine(childMachine);
+        activeMachine = prevMachine;
+        spawnOwnerStack.pop();
+        scopeStack.pop();
+        if (childOutcome.kind === "done") {
+          childReq.reply = { tag: "Answered", value: childOutcome.value };
+          childReq.settledAt = now;
+          cancelSpawnChildren(childReq.id);
+        } else if (childOutcome.kind === "failed") {
+          const reply: Reply = childOutcome.outcome
+            ? outcomeToReply(childOutcome.outcome)
+            : { tag: "Broke", reason: childOutcome.error ?? "Child task failed" };
+          childReq.reply = reply;
+          childReq.settledAt = now;
+          cancelSpawnChildren(childReq.id);
+        }
+      }
+      return { value: { type: "request", id: childReq.id }, at: childReq.openedAt };
+    }
 
     if (VERBS.includes(name)) {
       const holder = name === "judge" ? "@judge" : participant(args[0]);
@@ -802,19 +1136,29 @@ export function* slices(code: Code, source: Ledger, now: number, options: PassOp
           if (!request) {
             if (!permitted()) return revoked();
             const id = nextUniqueRequestId(reformAddress);
+            const initCandidates = name === "judge" ? null : candidatesOf(args[0], ledger);
             request = ledger.requests[id] = {
-              id, address: reformAddress, verb: name, holder, candidates: name === "judge" ? null : candidatesOf(args[0]),
-              excluded: name === "judge" ? [] : excludedOf(args[0]), delegatedBy: null, epoch: 0, text: question.value,
+              id, address: reformAddress, verb: name, holder, candidates: initCandidates,
+              ...(initCandidates ? { initialCandidates: [...initCandidates], initialGroupHolder: holder } : {}),
+              excluded: name === "judge" ? [] : excludedOf(args[0], ledger), delegatedBy: null, epoch: 0, text: question.value,
               conditions: conditionsOf(args[0]),
               about: labels.about ? show(labels.about) : null, context: labels.context ? show(labels.context) : null,
               options: choices?.type === "list" ? choices.values : null,
               form: nextForm,
-              by: instant(labels.by, now), openedAt: now, reply: null, settledAt: null, detached: false,
+              by: clampBy(instant(labels.by, now)), openedAt: now, reply: null, settledAt: null, detached: false,
+              openedBy: options.openedBy ?? currentScope(), spawnOwner: currentSpawnOwner(),
             };
+            if (labels.about?.type === "request") {
+              const parentReq = ledger.requests[labels.about.id];
+              if (parentReq) {
+                parentReq.waitingOn ??= [];
+                if (!parentReq.waitingOn.includes(id)) parentReq.waitingOn.push(id);
+              }
+            }
             byAddress.set(reformAddress, request);
             log.push({ kind: "opened", request: { ...request } });
           } else if (request.reply === null) {
-            const by = instant(labels.by, request.openedAt);
+            const by = clampBy(instant(labels.by, request.openedAt));
             if (by !== request.by) { pass.rescheduled.push({ id: request.id, from: request.by, to: by }); request.by = by; }
             request.detached = false;
           }
@@ -827,20 +1171,30 @@ export function* slices(code: Code, source: Ledger, now: number, options: PassOp
       if (!request) {
         if (!permitted()) return revoked();
         const id = v2 ? nextUniqueRequestId(resolvedAddress) : address;
+        const initCandidates = name === "judge" ? null : candidatesOf(args[0], ledger);
         request = ledger.requests[id] = {
-          id, ...(v2 ? { address: resolvedAddress } : {}), verb: name, holder, candidates: name === "judge" ? null : candidatesOf(args[0]),
-          excluded: name === "judge" ? [] : excludedOf(args[0]), delegatedBy: null, epoch: 0, text: question.value,
+          id, ...(v2 ? { address: resolvedAddress } : {}), verb: name, holder, candidates: initCandidates,
+          ...(initCandidates ? { initialCandidates: [...initCandidates], initialGroupHolder: holder } : {}),
+          excluded: name === "judge" ? [] : excludedOf(args[0], ledger), delegatedBy: null, epoch: 0, text: question.value,
           conditions: conditionsOf(args[0]),
           about: labels.about ? show(labels.about) : null, context: labels.context ? show(labels.context) : null,
           options: choices?.type === "list" ? choices.values : null,
           form: nextForm,
-          by: instant(labels.by, now), openedAt: now, reply: null, settledAt: null, detached: false,
+          by: clampBy(instant(labels.by, now)), openedAt: now, reply: null, settledAt: null, detached: false,
+          openedBy: options.openedBy ?? currentScope(), spawnOwner: currentSpawnOwner(),
         };
+        if (labels.about?.type === "request") {
+          const parentReq = ledger.requests[labels.about.id];
+          if (parentReq) {
+            parentReq.waitingOn ??= [];
+            if (!parentReq.waitingOn.includes(id)) parentReq.waitingOn.push(id);
+          }
+        }
         if (v2) byAddress.set(resolvedAddress, request);
         log.push({ kind: "opened", request: { ...request } });
       } else if (request.reply === null) {
         // The deadline and form are not part of who is asked what: moving them amends the same request.
-        const by = instant(labels.by, request.openedAt);
+        const by = clampBy(instant(labels.by, request.openedAt));
         if (by !== request.by) { pass.rescheduled.push({ id: request.id, from: request.by, to: by }); request.by = by; }
         if (v2 && JSON.stringify(request.form) !== JSON.stringify(nextForm)) {
           pass.formChanged.push({ id: request.id, from: request.form, to: nextForm });
@@ -888,6 +1242,7 @@ export function* slices(code: Code, source: Ledger, now: number, options: PassOp
       }));
       const state = structuredClone(rawEntry.value as unknown as LoopState);
 
+      const eachStrategy = effect.eachStrategy ?? "Latest";
       if (effect.loop === "continues") {
         // Seal the finished round atomically before checking for the next occurrence.
         scopeStack.pop();
@@ -908,12 +1263,43 @@ export function* slices(code: Code, source: Ledger, now: number, options: PassOp
           ledger.entries[storageKey] = { at: now, value: state as unknown as Json };
         }
       } else if (state.active) {
-        // An in-flight round is already active: enter its scope directly without re-evaluating sealed rounds.
-        const roundScope = `${displayKey}/round:${state.active.roundKey}`;
-        scopeStack.push(roundScope);
-        pass.loops.push({ key: displayKey, sealedRounds: state.sealedRounds, activeRound: state.active.roundKey, nextDue: null });
-        lastWaitEvaluated = true;
-        return { value: state.active.value, at: Math.max(state.active.at, state.lastTimerAt ?? state.startedAt) };
+        // Under `~each=Restart`, if a newer occurrence has arrived on any listened stream, cancel the active round and restart.
+        let restarted = false;
+        if (eachStrategy === "Restart") {
+          const checkDetailed = detailedTargetsOf(ledger, args[0], state.lastTimerAt ?? state.startedAt);
+          const hasNewer = checkDetailed.some(item => {
+            if (item.target.kind !== "stream") return false;
+            const streamKey = eventKey(item.target.source);
+            const activeNext = state.active?.streamTaken?.stream === streamKey ? state.active.streamTaken.next : (state.streams[streamKey] ?? state.from);
+            return ledger.occurrences.some((occ, idx) => idx >= activeNext && occ.key === streamKey);
+          });
+          if (hasNewer) {
+            const activePrefix = `request:${displayKey}/round:${state.active.roundKey}/`;
+            for (const req of Object.values(ledger.requests)) {
+              if (req.reply === null && (req.address ?? req.id).startsWith(activePrefix)) {
+                close(req, { tag: "Cancelled" }, now);
+                if (req.verb === "spawn") cancelSpawnChildren(req.id);
+              }
+            }
+            if (state.active.streamTaken) {
+              const prev = state.streams[state.active.streamTaken.stream] ?? state.from;
+              state.streams[state.active.streamTaken.stream] = Math.max(prev, state.active.streamTaken.next);
+            }
+            state.sealedRounds += 1;
+            state.active = null;
+            state.waitingLogged = false;
+            ledger.entries[storageKey] = { at: now, value: state as unknown as Json };
+            restarted = true;
+          }
+        }
+        if (!restarted && state.active) {
+          // An in-flight round is already active: enter its scope directly without re-evaluating sealed rounds.
+          const roundScope = `${displayKey}/round:${state.active.roundKey}`;
+          scopeStack.push(roundScope);
+          pass.loops.push({ key: displayKey, sealedRounds: state.sealedRounds, activeRound: state.active.roundKey, nextDue: null });
+          lastWaitEvaluated = true;
+          return { value: state.active.value, at: Math.max(state.active.at, state.lastTimerAt ?? state.startedAt) };
+        }
       }
 
       // Select the next occurrence for this loop.
@@ -935,6 +1321,7 @@ export function* slices(code: Code, source: Ledger, now: number, options: PassOp
       const targets = detailed.map(item => item.target);
       const candidates: Candidate[] = [];
       const rejectedStreamProgress = new Map<string, number>();
+      const scanStates = loadScanStates(storageKey);
       let loopNextDue: number | null = null;
       const trackDue = (at: number): void => {
         due(at);
@@ -950,7 +1337,7 @@ export function* slices(code: Code, source: Ledger, now: number, options: PassOp
           let guard = 0;
           while (tickAt <= now && guard++ < 10_000) {
             if (!state.sealedTimerInstants.includes(tickAt)) {
-              const transformed = applyOps(code, machine, { type: "time", value: String(tickAt) }, ops, now);
+              const transformed = applyOps(code, activeMachine, { type: "time", value: String(tickAt) }, ops, now, tickAt, scanStates);
               if (transformed !== null) {
                 candidates.push({ at: tickAt, value: transformed, rank: 2, roundKey: `timer@${tickAt}`, timerAt: tickAt, evaluated: true });
                 break;
@@ -961,11 +1348,22 @@ export function* slices(code: Code, source: Ledger, now: number, options: PassOp
           }
           if (Number.isFinite(tickAt) && tickAt > now) trackDue(tickAt);
         } else if (target.kind === "fact") {
-          const fact = ledger.facts[eventKey(target.source)];
-          if (fact) {
-            const transformed = applyOps(code, machine, fact.value, ops, now);
-            if (transformed !== null) {
-              candidates.push({ at: Math.max(fact.at, began), value: transformed, rank: 2, roundKey: `fact:${sha256(eventKey(target.source)).slice(0, 12)}`, evaluated: true });
+          if (target.source.name === "taken") {
+            const reqId = (target.source.args[0] as Extract<Value, { type: "request" }>).id;
+            const takenAt = ledger.requests[reqId]?.takenAt ?? null;
+            if (takenAt !== null) {
+              const transformed = applyOps(code, activeMachine, { type: "time", value: String(takenAt) }, ops, now, takenAt, scanStates);
+              if (transformed !== null) {
+                candidates.push({ at: Math.max(takenAt, began), value: transformed, rank: 2, roundKey: `taken:${reqId}`, evaluated: true });
+              }
+            }
+          } else {
+            const fact = ledger.facts[eventKey(target.source)];
+            if (fact) {
+              const transformed = applyOps(code, activeMachine, fact.value, ops, now, fact.at, scanStates);
+              if (transformed !== null) {
+                candidates.push({ at: Math.max(fact.at, began), value: transformed, rank: 2, roundKey: `fact:${sha256(eventKey(target.source)).slice(0, 12)}`, evaluated: true });
+              }
             }
           }
         } else if (target.kind === "stream") {
@@ -976,8 +1374,7 @@ export function* slices(code: Code, source: Ledger, now: number, options: PassOp
           const streamDigest = sha256(streamKey).slice(0, 12);
           const lastIndex = arrived.at(-1)!.index;
           if (target.gathered) {
-            // Apply inner ops before gather? In Norn `gather` only wraps a raw host stream, so ops wrap the gathered list.
-            const transformed = applyOps(code, machine, { type: "list", values: arrived.map(each => each.value) }, ops, now);
+            const transformed = applyOps(code, activeMachine, { type: "list", values: arrived.map(each => each.value) }, ops, now, arrived[0].at, scanStates);
             if (transformed !== null) {
               candidates.push({
                 at: arrived[0].at, value: transformed, rank: 2,
@@ -991,15 +1388,20 @@ export function* slices(code: Code, source: Ledger, now: number, options: PassOp
           } else {
             const matched: { at: number; index: number; value: Value }[] = [];
             for (const occurrence of arrived) {
-              const transformed = applyOps(code, machine, occurrence.value, ops, now);
-              if (transformed !== null) matched.push({ at: occurrence.at, index: occurrence.index, value: transformed });
+              const transformed = applyOps(code, activeMachine, occurrence.value, ops, now, occurrence.at, scanStates);
+              if (transformed !== null) {
+                matched.push({ at: occurrence.at, index: occurrence.index, value: transformed });
+                if (eachStrategy === "Queue") break;
+              }
             }
             if (matched.length) {
               const first = matched[0], latest = matched.at(-1)!;
+              const picked = eachStrategy === "Queue" ? first : latest;
+              const nextCursor = eachStrategy === "Queue" ? picked.index + 1 : lastIndex + 1;
               candidates.push({
-                at: first.at, value: latest.value, rank: 2,
-                taken: { stream: streamKey, next: lastIndex + 1 },
-                roundKey: `stream:${streamDigest}#${latest.index}`,
+                at: picked.at, value: picked.value, rank: 2,
+                taken: { stream: streamKey, next: nextCursor },
+                roundKey: `stream:${streamDigest}#${picked.index}`,
                 evaluated: true,
               });
             } else {
@@ -1008,6 +1410,8 @@ export function* slices(code: Code, source: Ledger, now: number, options: PassOp
           }
         }
       }
+
+      saveScanStates(storageKey, scanStates);
 
       candidates.sort((a, b) => a.at - b.at || a.rank - b.rank);
       const winner = candidates[0];
@@ -1080,45 +1484,16 @@ export function* slices(code: Code, source: Ledger, now: number, options: PassOp
             candidates.push({ at, value: wrapped, rank, ...(from ? { taken: from } : {}), ...(alreadyWrapped ? { evaluated: true } : {}) });
           } else due(at);
         };
+        const scanStates = loadScanStates(key);
         for (const item of detailed) {
           const { target, ops, timer } = item;
           if (target.kind === "request") {
             const request = ledger.requests[target.id];
             if (lost && request.reply === null) close(request, { tag: "Revoked" }, now);
             if (request.reply) {
-              // Apply any pure `accepting` validators attached to the request handle.
-              const validators = args[0].type === "request" ? (args[0].validators ?? []) : [];
-              if (request.reply.tag === "Answered" && validators.length > 0) {
-                let currentVal = request.reply.value;
-                let rejectedReason: string | null = null;
-                for (const fn of validators) {
-                  let res: Value;
-                  try {
-                    res = runPure(code, fn, currentVal, machine, now);
-                  } catch (err) {
-                    throw new ProgramError(err instanceof Error ? err.message : String(err));
-                  }
-                  if (res.type === "variant" && res.name === "Ok" && res.args.length === 1) {
-                    currentVal = res.args[0]!;
-                  } else if (res.type === "variant" && res.name === "Error" && res.args.length === 1 && res.args[0]!.type === "string") {
-                    rejectedReason = res.args[0]!.value;
-                    break;
-                  } else {
-                    throw new ProgramError("accepting validator must return Ok(value) or Error(string)");
-                  }
-                }
-                if (rejectedReason !== null) {
-                  const errItem: FormPathError = { path: "$", expected: "accepted value", found: show(request.reply.value) };
-                  ledger.evidence.push({ request: request.id, holder: request.holder, at: now, reply: request.reply, reason: rejectedReason });
-                  (pass.validationErrors ??= []).push({ id: request.id, reason: rejectedReason, errors: [errItem] });
-                  request.reply = null;
-                  request.settledAt = null;
-                  if (request.by !== null) due(request.by);
-                } else {
-                  occurred(request.settledAt!, replyValue({ tag: "Answered", value: currentVal }), [], 2);
-                }
-              } else {
-                occurred(request.settledAt!, replyValue(request.reply), [], request.reply.tag === "NoReply" ? 0 : 2);
+              const tr = applyRequestTransforms(activeMachine, args[0], request, request.reply);
+              if (tr.ok) {
+                occurred(request.settledAt!, replyValue(tr.reply), [], tr.reply.tag === "NoReply" ? 0 : 2);
               }
             }
             else if (request.by !== null) due(request.by);
@@ -1130,7 +1505,7 @@ export function* slices(code: Code, source: Ledger, now: number, options: PassOp
               const period = timer?.kind === "every" ? timer.period : 0;
               let guard = 0;
               while (tickAt <= now && guard++ < 10_000) {
-                const transformed = applyOps(code, machine, { type: "time", value: String(tickAt) }, ops, now);
+                const transformed = applyOps(code, activeMachine, { type: "time", value: String(tickAt) }, ops, now, tickAt, scanStates);
                 if (transformed !== null) { occurred(tickAt, transformed, target.path, 2, undefined, true); break; }
                 if (period <= 0) { tickAt = Number.POSITIVE_INFINITY; break; }
                 tickAt += period;
@@ -1138,12 +1513,25 @@ export function* slices(code: Code, source: Ledger, now: number, options: PassOp
               if (Number.isFinite(tickAt) && tickAt > now) due(tickAt);
             }
           } else if (target.kind === "fact") {
-            const fact = ledger.facts[eventKey(target.source)];
-            if (fact) {
-              if (!usePureEval) occurred(Math.max(fact.at, began), fact.value, target.path);
-              else {
-                const transformed = applyOps(code, machine, fact.value, ops, now);
-                if (transformed !== null) occurred(Math.max(fact.at, began), transformed, target.path, 2, undefined, true);
+            if (target.source.name === "taken") {
+              const reqId = (target.source.args[0] as Extract<Value, { type: "request" }>).id;
+              const takenAt = ledger.requests[reqId]?.takenAt ?? null;
+              if (takenAt !== null) {
+                const rawTime: Value = { type: "time", value: String(takenAt) };
+                if (!usePureEval) occurred(Math.max(takenAt, began), rawTime, target.path);
+                else {
+                  const transformed = applyOps(code, activeMachine, rawTime, ops, now, takenAt, scanStates);
+                  if (transformed !== null) occurred(Math.max(takenAt, began), transformed, target.path, 2, undefined, true);
+                }
+              }
+            } else {
+              const fact = ledger.facts[eventKey(target.source)];
+              if (fact) {
+                if (!usePureEval) occurred(Math.max(fact.at, began), fact.value, target.path);
+                else {
+                  const transformed = applyOps(code, activeMachine, fact.value, ops, now, fact.at, scanStates);
+                  if (transformed !== null) occurred(Math.max(fact.at, began), transformed, target.path, 2, undefined, true);
+                }
               }
             }
           } else {
@@ -1157,12 +1545,12 @@ export function* slices(code: Code, source: Ledger, now: number, options: PassOp
               else if (next) occurred(next.at, next.value, target.path, 2, { stream, next: next.index + 1 });
             } else if (next) {
               if (target.gathered) {
-                const transformed = applyOps(code, machine, { type: "list", values: arrived.map(each => each.value) }, ops, now);
+                const transformed = applyOps(code, activeMachine, { type: "list", values: arrived.map(each => each.value) }, ops, now, next.at, scanStates);
                 if (transformed !== null) occurred(next.at, transformed, target.path, 2, { stream, next: latest!.index + 1 }, true);
               } else {
                 const matched: { at: number; index: number; value: Value }[] = [];
                 for (const occurrence of arrived) {
-                  const transformed = applyOps(code, machine, occurrence.value, ops, now);
+                  const transformed = applyOps(code, activeMachine, occurrence.value, ops, now, occurrence.at, scanStates);
                   if (transformed !== null) {
                     matched.push({ at: occurrence.at, index: occurrence.index, value: transformed });
                     if (!loop) break;
@@ -1176,6 +1564,7 @@ export function* slices(code: Code, source: Ledger, now: number, options: PassOp
             }
           }
         }
+        saveScanStates(key, scanStates);
         if (until !== null) { if (until <= now) candidates.push({ at: until, value: unit, rank: 1 }); else due(until); }
         candidates.sort((a, b) => a.at - b.at || a.rank - b.rank);
         const winner = candidates[0];
@@ -1198,27 +1587,51 @@ export function* slices(code: Code, source: Ledger, now: number, options: PassOp
     if (name === "first") {
       const list = args[0];
       if (args.length !== 1 || list.type !== "list" || !list.values.length) throw new ProgramError("first needs a nonempty list of requests");
-      const requests = list.values.map(value => handle(name, value));
+      const reqPairs = list.values.map(value => ({ val: value, req: handle(name, value) }));
+      const requests = reqPairs.map(pair => pair.req);
       const key = identity("first", { ids: requests.map(request => request.id) });
       let won = ledger.entries[key];
       if (!won) {
         const lost = !permitted();
         for (const request of requests) if (lost && request.reply === null) close(request, { tag: "Revoked" }, now);
-        const ended = requests.filter(request => request.reply !== null && request.settledAt! <= now).sort((a, b) => a.settledAt! - b.settledAt!);
-        if (!ended.length) {
+        const ended = reqPairs
+          .filter(pair => pair.req.reply !== null && pair.req.settledAt! <= now)
+          .sort((a, b) => a.req.settledAt! - b.req.settledAt!);
+        let chosen: { req: LedgerRequest; reply: Reply } | null = null;
+        for (const item of ended) {
+          const tr = applyRequestTransforms(activeMachine, item.val, item.req, item.req.reply!);
+          if (tr.ok) { chosen = { req: item.req, reply: tr.reply }; break; }
+        }
+        if (!chosen) {
           for (const request of requests) if (request.by !== null) due(request.by);
           pass.waiting = { targets: requests.map(request => ({ kind: "request", id: request.id })), until: null };
           return null;
         }
-        won = ledger.entries[key] = { at: ended[0].settledAt!, value: ended[0].id };
+        won = ledger.entries[key] = { at: chosen.req.settledAt!, value: chosen.req.id };
       }
+      const winnerPair = reqPairs.find(pair => pair.req.id === (won.value as string));
       const winner = ledger.requests[won.value as string];
-      return { value: { type: "tuple", values: [{ type: "request", id: winner.id }, replyValue(winner.reply!)] }, at: Math.max(won.at, ledger.startedAt) };
+      const winnerTr = winnerPair && winner.reply ? applyRequestTransforms(activeMachine, winnerPair.val, winner, winner.reply) : null;
+      const finalReply = winnerTr?.ok ? winnerTr.reply : winner.reply!;
+      return { value: { type: "tuple", values: [winnerPair?.val ?? { type: "request", id: winner.id }, replyValue(finalReply)] }, at: Math.max(won.at, ledger.startedAt) };
     }
 
     if (name === "say") {
-      if (args.length !== 2 || !["participant", "ref"].includes(args[0].type) || args[1].type !== "string") throw new ProgramError("say needs a participant or a reference, and text");
-      const to = show(args[0]), body = args[1].value;
+      if (args.length !== 2 || !["participant", "ref", "request"].includes(args[0].type) || args[1].type !== "string") {
+        throw new ProgramError("say needs a participant, a reference or a request, and text");
+      }
+      const body = args[1].value;
+      if (args[0].type === "request") {
+        const req = handle("say", args[0]);
+        const key = identity("say", { to: req.id, body });
+        if (!ledger.entries[key]) {
+          if (!permitted()) return revoked();
+          addNote(ledger, req.id, options.openedBy ?? currentScope(), body, now);
+          log.push({ kind: "said", to: req.id, text: body });
+        }
+        return { value: unit, at: entry(key, () => ({ at: now, value: null })).at };
+      }
+      const to = show(args[0]);
       const key = identity("say", { to, body });
       if (!ledger.entries[key]) {
         if (!permitted()) return revoked();
@@ -1239,17 +1652,63 @@ export function* slices(code: Code, source: Ledger, now: number, options: PassOp
       const key = identity(name, { id: request.id, next });
       if (!ledger.entries[key]) {
         if (!permitted()) return revoked();
-        if (request.reply === null && next === null) close(request, { tag: "Cancelled" }, now);
-        else if (request.reply === null) {
+        if (request.reply === null && next === null) {
+          close(request, { tag: "Cancelled" }, now);
+          if (request.verb === "spawn") cancelSpawnChildren(request.id);
+        } else if (request.reply === null) {
           log.push({ kind: "handedOver", id: request.id, from: request.holder, to: next! });
-          request.holder = next!; request.candidates = candidatesOf(args[1]); request.excluded = excludedOf(args[1]);
-          request.conditions = conditionsOf(args[1]); request.delegatedBy = null; request.epoch++;
+          const nextCandidates = candidatesOf(args[1], ledger);
+          request.holder = next!; request.candidates = nextCandidates;
+          request.initialCandidates = nextCandidates ? [...nextCandidates] : null;
+          request.initialGroupHolder = nextCandidates ? next! : null;
+          request.excluded = excludedOf(args[1], ledger);
+          request.conditions = conditionsOf(args[1]); request.delegatedBy = null; request.takenAt = null; request.epoch++;
         }
       }
       const at = entry(key, () => ({ at: now, value: null })).at;
       return { value: next === null ? unit : { type: "request", id: request.id }, at };
     }
     throw new Error(`The ledger runtime does not implement the effect ${name}`);
+  };
+
+  const outcomeToReply = (outcome: Value): Reply => {
+    if (outcome.type === "variant") {
+      if (outcome.name === "Refused" && outcome.args[0]?.type === "string") return { tag: "Refused", reason: outcome.args[0].value };
+      if (outcome.name === "Broke" && outcome.args[0]?.type === "string") return { tag: "Broke", reason: outcome.args[0].value };
+      if (outcome.name === "NoReply" || outcome.name === "Cancelled" || outcome.name === "Revoked") return { tag: outcome.name };
+    }
+    return { tag: "Broke", reason: show(outcome) };
+  };
+
+  /** Runs a child (`spawn`) machine to completion, failure, or suspension against the shared ledger. */
+  const driveMachine = (target: Machine): { kind: "done"; value: Value } | { kind: "failed"; outcome: Value | null; error: string | null } | { kind: "waiting" } => {
+    let childBudget = Math.ceil((options.steps ?? 5_000_000) / 10_000);
+    for (;;) {
+      advance(code, target, 10_000);
+      const control = target.control;
+      if (control.kind === "done") return { kind: "done", value: control.value };
+      if (control.kind === "error") return { kind: "failed", outcome: null, error: control.message };
+      if (control.kind === "failed") return { kind: "failed", outcome: control.outcome, error: null };
+      if (control.kind === "report") {
+        const key = identity("report", control.outcome);
+        if (!ledger.entries[key]) log.push({ kind: "handlerFailed", reply: control.outcome });
+        resume(target, unit, entry(key, () => ({ at: now, value: control.outcome as unknown as Json })).at); continue;
+      }
+      if (control.kind !== "effect") {
+        if (--childBudget <= 0) return { kind: "failed", outcome: null, error: "The spawned task computed for too long without waiting or finishing" };
+        continue;
+      }
+      let resumption: { value: Value; at: number } | null;
+      try { resumption = answer(control.effect); } catch (error) {
+        if (!(error instanceof ProgramError)) throw error;
+        return { kind: "failed", outcome: null, error: error.message };
+      }
+      if (!resumption) return { kind: "waiting" };
+      const { name, args } = control.effect;
+      const mapped = !lastWaitEvaluated && (name === "wait" || name === "waitUntil") ? through(args[0], resumption.value, name) : null;
+      if (mapped) resumeThrough(target, mapped.value, mapped.steps, resumption.at);
+      else resume(target, resumption.value, resumption.at);
+    }
   };
 
   // A pass that never reaches a wait is a bug in the program; it fails in the open instead of spinning.

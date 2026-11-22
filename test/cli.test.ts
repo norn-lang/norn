@@ -156,7 +156,7 @@ test("norn check --host checks programs against another interface, and refuses a
   // The reference host's facts are not there.
   const other = norn(["check", "--host", host, "examples/release-chain.norn"]);
   assert.equal(other.status, 1);
-  assert.match(other.stderr, /^error: unknown name merged at examples\/release-chain\.norn:2:10/);
+  assert.match(other.stderr, /^error: unknown name merged(?:; did you mean merge\?)? at examples\/release-chain\.norn:2:10/);
   // A broken interface is reported, and nothing is checked against it.
   writeFileSync(host, "type ticket\nlet x = 1\n");
   const broken = norn(["check", "--host", host, program]);
