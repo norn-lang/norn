@@ -62,8 +62,8 @@ const malformed: [string, (document: Json) => unknown, string][] = [
   ["not JSON", () => "{", "not JSON: "],
   ["not an object", () => [], "not a norn-ast document"],
   ["another format", (d) => { d.format = "estree"; }, "not a norn-ast document"],
-  ["another version", (d) => { d.version = 3; }, "version: unsupported norn-ast version 3; expected 1 or 2"],
-  ["a version that is not a number", (d) => { d.version = "1"; }, `version: unsupported norn-ast version "1"; expected 1 or 2`],
+  ["another version", (d) => { d.version = 4; }, "version: unsupported norn-ast version 4; expected 1, 2 or 3"],
+  ["a version that is not a number", (d) => { d.version = "1"; }, `version: unsupported norn-ast version "1"; expected 1, 2 or 3`],
   ["an unknown document field", (d) => { d.extra = true; }, `unknown field "extra" in the document`],
   ["no program", (d) => { delete d.program; }, "the document has no program"],
   ["a program that is not a Program", (d) => { d.program = d.program.body[2]; }, "program: expected a Program node, found a Let node"],
@@ -98,7 +98,6 @@ const malformed: [string, (document: Json) => unknown, string][] = [
   ["a signed duration", (d) => { d.program.body[3].cases[1].body.elseBranch.body[0].elements[1].amount = "-2"; }, `program.body[3].cases[1].body.elseBranch.body[0].elements[1].amount: expected a string of digits such as "42", found "-2"`],
   ["an unknown unit", (d) => { d.program.body[3].cases[1].body.elseBranch.body[0].elements[1].unit = "s"; }, `program.body[3].cases[1].body.elseBranch.body[0].elements[1].unit: expected one of "m", "h", "d", "w", found "s"`],
   ["an unknown operator", (d) => { d.program.body[4].value.body.op = "%"; }, `program.body[4].value.body.op: expected one of "||", "&&", "==", "!=", "<", "<=", ">", ">=", "+", "-", "++", "+.", "-.", "*", "/", "*.", "/.", found "%"`],
-  ["another module", (d) => { d.program.body[1].module = "Belt"; }, `program.body[1].module: expected one of "Std", found "Belt"`],
   // Nullable slots and lists
   ["null where a node is required", (d) => { d.program.body[2].value = null; }, "program.body[2].value: expected an expression, found null"],
   ["the wrong node in a nullable slot", (d) => { const branch = d.program.body[3].cases[1].body; branch.elseBranch = d.program.body[2].value; }, "program.body[3].cases[1].body.elseBranch: expected a Block or If node, found a Call node"],
@@ -110,7 +109,7 @@ const malformed: [string, (document: Json) => unknown, string][] = [
 
 test("a tree is written with the lowest version that can express it", () => {
   // Version 1 trees keep their exact bytes: the runtime pins a program's code by a hash of them.
-  assert.equal(AST_VERSION, 2);
+  assert.equal(AST_VERSION, 3);
   assert.equal(astVersion(program), 1);
   assert.ok(text.startsWith(`{"format":"norn-ast","version":1,`));
   // An external, a function type or an abstract type needs version 2.

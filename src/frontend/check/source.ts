@@ -8,7 +8,7 @@ import type * as A from "../ast.ts";
 import { STACK_EXHAUSTED } from "../diagnostics.ts";
 import { parse } from "../parser.ts";
 import type { CheckDiagnostic } from "./diagnostics.ts";
-import { checkProgram, loadLibrary, type CheckOptions, type CheckResult, type Library } from "./infer.ts";
+import { checkProgram, loadLibrary, type CheckOptions, type CheckResult, type Library, type LoadLibraryOptions } from "./infer.ts";
 import { builtinInterface, loadInterface, type HostInterface } from "./interface.ts";
 
 /** A host interface from source text. A syntax error makes an interface of the built-ins alone, with the error. */
@@ -18,14 +18,24 @@ export function readInterface(source: string, file: string): HostInterface {
   return loadInterface(parsed.program, file);
 }
 
-/** The standard library from source text, checked against a host. */
-export function readLibrary(source: string, file: string, host: HostInterface): Library {
+/** A library (`Std`, application library, or Space library) from source text, checked against a host. */
+export function readLibrary(source: string, file: string, host: HostInterface, options?: LoadLibraryOptions): Library {
   const parsed = parse(source);
   if (!parsed.ok) {
     const program: A.Program = { kind: "Program", body: [], span: { start: { line: 1, column: 1, offset: 0 }, end: { line: 1, column: 1, offset: 0 } } };
-    return { file, program, exports: [], types: [], resolutions: new Map(), diagnostics: parsed.diagnostics.map(syntax), ok: false };
+    return {
+      file,
+      ...(options?.name ? { name: options.name } : {}),
+      program,
+      exports: [],
+      types: [],
+      needs: [],
+      resolutions: new Map(),
+      diagnostics: parsed.diagnostics.map(syntax),
+      ok: false,
+    };
   }
-  return loadLibrary(parsed.program, file, host);
+  return loadLibrary(parsed.program, file, host, options);
 }
 
 export interface SourceCheck extends CheckResult {

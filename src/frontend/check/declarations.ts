@@ -14,7 +14,7 @@ import {
   type TypeFacts,
 } from "./types.ts";
 
-export type Origin = "builtin" | "host" | "std" | "program";
+export type Origin = "builtin" | "host" | "std" | "library" | "program";
 
 export interface TypeInfo {
   readonly name: string;
@@ -22,6 +22,14 @@ export interface TypeInfo {
   /** `source` is one of `event`, `stream` and `request`: names of the internal source type. */
   readonly kind: "base" | "list" | "variant" | "record" | "alias" | "abstract" | "source";
   readonly origin: Origin;
+  /** Defining library name when declared inside a library (e.g. `"Review"`, `"GitHub"`). */
+  readonly library?: string;
+  /** `"pub"` when explicitly exported, `"private"` when internal to a library. */
+  readonly visibility?: "pub" | "private";
+  /** True for `pub opaque type`: generative and sealed outside its defining library. */
+  readonly opaque?: boolean;
+  /** Leading `/** ... *\/` documentation comment, if any. */
+  readonly doc?: string;
   readonly decl: A.TypeDecl | null;
   constructors: CtorInfo[];
   fields: FieldInfo[];
@@ -39,12 +47,14 @@ export interface CtorInfo {
   args: Type[];
   /** The position among the owner's constructors. */
   readonly index: number;
+  readonly doc?: string;
   readonly decl: A.ConstructorDecl | null;
 }
 
 export interface FieldInfo {
   readonly name: string;
   type: Type;
+  readonly doc?: string;
   readonly decl: A.FieldDecl | null;
 }
 
@@ -54,47 +64,82 @@ export class TypeTable implements TypeFacts {
   readonly constructors: Map<string, CtorInfo>;
   /** Record types in declaration order, for field-directed resolution. */
   readonly records: TypeInfo[];
+  /** Qualified module types (`Module.type` -> TypeInfo). */
+  readonly qualifiedTypes: Map<string, TypeInfo>;
+  /** Current library being checked (null for a program); opaque types from other libraries are sealed. */
+  currentLibrary: string | null;
 
-  constructor(parent?: TypeTable) {
+  constructor(parent?: TypeTable, currentLibrary: string | null = null) {
     this.types = new Map(parent?.types);
     this.constructors = new Map(parent?.constructors);
     this.records = [...(parent?.records ?? [])];
+    this.qualifiedTypes = new Map(parent?.qualifiedTypes);
+    this.currentLibrary = currentLibrary;
+  }
+
+  /** True when `info` is an opaque type viewed from outside its defining library. */
+  isSealedOpaque(info: TypeInfo | undefined): boolean {
+    return Boolean(info?.opaque && info.library && info.library !== this.currentLibrary);
+  }
+
+  /** Looks up either an unqualified type name or a qualified `Lib.type` name. */
+  lookupType(name: string): TypeInfo | undefined {
+    return this.types.get(name) ?? this.qualifiedTypes.get(name);
   }
 
   equalityRule(name: string): EqualityRule {
-    const info = this.types.get(name);
+    const info = this.lookupType(name);
     if (info === undefined) return { never: false, params: [] };
+    if (this.isSealedOpaque(info)) return { never: true, params: [] };
     return { never: info.equality.never, params: [...info.equality.params] };
   }
 
-  /** The latest declared record type with all of these fields, or null. */
+  /** The latest declared record type with all of these fields, or null (skipping sealed opaque types). */
   recordWith(fields: readonly string[]): TypeInfo | null {
     for (let index = this.records.length - 1; index >= 0; index -= 1) {
       const record = this.records[index]!;
+      if (this.isSealedOpaque(record)) continue;
       if (fields.every((field) => record.fields.some((declared) => declared.name === field))) return record;
     }
     return null;
   }
 
-  /** The latest declared record type whose fields are exactly these, or null. */
+  /** The latest declared record type whose fields are exactly these, or null (skipping sealed opaque types). */
   recordExactly(fields: readonly string[]): TypeInfo | null {
     for (let index = this.records.length - 1; index >= 0; index -= 1) {
       const record = this.records[index]!;
+      if (this.isSealedOpaque(record)) continue;
       if (record.fields.length === fields.length && fields.every((field) => record.fields.some((declared) => declared.name === field))) return record;
     }
     return null;
   }
 
-  /** Whether any record type has a field of this name. */
+  /** Whether any accessible record type has a field of this name. */
   hasField(field: string): boolean {
-    return this.records.some((record) => record.fields.some((declared) => declared.name === field));
+    return this.records.some((record) => !this.isSealedOpaque(record) && record.fields.some((declared) => declared.name === field));
   }
 
-  /** Adds a type that was read elsewhere, such as one of the standard library's. */
-  adopt(info: TypeInfo): void {
-    this.types.set(info.name, info);
-    for (const ctor of info.constructors) this.constructors.set(ctor.name, ctor);
-    if (info.kind === "record") this.records.push(info);
+  /** Adds a type that was read elsewhere, such as one of the standard library's or an opened library's. */
+  adopt(info: TypeInfo, qualifiedOnly = false): void {
+    const sealed = this.isSealedOpaque(info);
+    if (info.library) {
+      const qname = `${info.library}.${info.name}`;
+      this.qualifiedTypes.set(qname, info);
+      // Generative opaque types are stored by canonical qualified name so they can never collide or be forged.
+      if (info.opaque) this.types.set(qname, info);
+    }
+    if (!qualifiedOnly) {
+      this.types.set(info.name, info);
+      if (!sealed) {
+        for (const ctor of info.constructors) this.constructors.set(ctor.name, ctor);
+        if (info.kind === "record" && !this.records.includes(info)) this.records.push(info);
+      }
+    } else if (!sealed) {
+      for (const ctor of info.constructors) {
+        if (!this.constructors.has(ctor.name)) this.constructors.set(ctor.name, ctor);
+      }
+      if (info.kind === "record" && !this.records.includes(info)) this.records.push(info);
+    }
   }
 }
 
@@ -136,6 +181,8 @@ export class TypeReader {
   /** A type expression as a type. A part that cannot be read is reported, and is UNREADABLE in the result. */
   read(node: A.TypeExpression, variables: TypeVariables): Type {
     switch (node.kind) {
+      case "TypeHole":
+        return UNREADABLE;
       case "TypeVar":
         return variables.lookup(node);
       case "TupleType":
@@ -162,13 +209,13 @@ export class TypeReader {
   }
 
   private readName(node: A.TypeName, variables: TypeVariables): Type {
-    const info = this.table.types.get(node.name);
+    const info = this.table.lookupType(node.name);
     const args = node.args.map((arg) => this.read(arg, variables));
     if (info === undefined) {
       const removed = REMOVED_TYPES.get(node.name);
       const hint = node.name === "source"
         ? "; write event<…>, stream<…> or request<…>"
-        : removed !== undefined ? `; ${removed}` : suggestion(closest(node.name, this.table.types.keys()));
+        : removed !== undefined ? `; ${removed}` : suggestion(closest(node.name, [...this.table.types.keys(), ...this.table.qualifiedTypes.keys()]));
       this.report({ severity: "error", code: "unknown-type", message: `unknown type ${node.name}${hint}`, span: node.span });
       return UNREADABLE;
     }
@@ -183,14 +230,16 @@ export class TypeReader {
       });
       return UNREADABLE;
     }
+    const canonicalName = info.opaque && info.library ? `${info.library}.${info.name}` : info.name;
     switch (info.kind) {
       case "source":
         // A request<'a> is waited on for a reply<'a>.
         return info.sourceKind === REQUEST ? requestOf(args[0]!) : source(info.sourceKind!, args[0]!);
       case "alias":
+        if (this.table.isSealedOpaque(info)) return con(canonicalName, ...args);
         return rebuild(this.aliasOf(info), (leaf) => (leaf.tag === "param" && leaf.index >= 0 ? args[leaf.index]! : leaf));
       default:
-        return con(info.name, ...args);
+        return con(canonicalName, ...args);
     }
   }
 
@@ -238,11 +287,18 @@ function parameterScope(info: TypeInfo, report: Report): TypeVariables {
  * order. Abstract types are allowed only where `abstract` says so: in host
  * interface files.
  */
-export function declareTypes(table: TypeTable, decls: readonly A.TypeDecl[], origin: Origin, report: Report, abstract: boolean): TypeInfo[] {
+export function declareTypes(
+  table: TypeTable,
+  decls: readonly A.TypeDecl[],
+  origin: Origin,
+  report: Report,
+  abstract: boolean,
+  library?: string,
+): TypeInfo[] {
   const declared: TypeInfo[] = [];
   for (const decl of decls) {
     const existing = table.types.get(decl.name);
-    if (existing !== undefined) {
+    if (existing !== undefined && existing.library === library) {
       report({
         severity: "error",
         code: "duplicate-type",
@@ -273,9 +329,24 @@ export function declareTypes(table: TypeTable, decls: readonly A.TypeDecl[], ori
         span: decl.span,
       });
     }
-    const info = typeInfo({ name: decl.name, params, kind, origin, decl });
+    const info = typeInfo({
+      name: decl.name,
+      params,
+      kind,
+      origin,
+      ...(library ? { library } : {}),
+      visibility: decl.visibility === "pub" ? "pub" : "private",
+      ...(decl.opaque ? { opaque: true } : {}),
+      ...(decl.doc ? { doc: decl.doc } : {}),
+      decl,
+    });
     if (kind === "abstract") info.equality.params = new Set(params.map((_, index) => index));
     table.types.set(decl.name, info);
+    if (library) {
+      const qname = `${library}.${decl.name}`;
+      table.qualifiedTypes.set(qname, info);
+      if (decl.opaque) table.types.set(qname, info);
+    }
     declared.push(info);
   }
   // Constructors and fields, once every name is known.
@@ -284,7 +355,7 @@ export function declareTypes(table: TypeTable, decls: readonly A.TypeDecl[], ori
     if (definition?.kind === "VariantType") {
       for (const decl of definition.constructors) {
         const existing = table.constructors.get(decl.name);
-        if (existing !== undefined) {
+        if (existing !== undefined && existing.owner.library === library) {
           report({
             severity: "error",
             code: "duplicate-constructor",
@@ -293,7 +364,7 @@ export function declareTypes(table: TypeTable, decls: readonly A.TypeDecl[], ori
           });
           continue;
         }
-        const ctor: CtorInfo = { name: decl.name, owner: info, args: [], index: info.constructors.length, decl };
+        const ctor: CtorInfo = { name: decl.name, owner: info, args: [], index: info.constructors.length, ...(decl.doc ? { doc: decl.doc } : {}), decl };
         info.constructors.push(ctor);
         table.constructors.set(decl.name, ctor);
       }
@@ -303,7 +374,7 @@ export function declareTypes(table: TypeTable, decls: readonly A.TypeDecl[], ori
           report({ severity: "error", code: "duplicate-field", message: `the field ${decl.name} is declared twice in ${info.name}`, span: decl.span });
           continue;
         }
-        info.fields.push({ name: decl.name, type: UNREADABLE, decl });
+        info.fields.push({ name: decl.name, type: UNREADABLE, ...(decl.doc ? { doc: decl.doc } : {}), decl });
       }
       table.records.push(info);
     }

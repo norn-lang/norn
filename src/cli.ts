@@ -3,11 +3,11 @@
  * The `norn` command line. Run it with `npm run norn -- <command>` or
  * `node src/cli.ts <command>`; `npm link` puts `norn` on the PATH.
  */
-import { readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import process from "node:process";
 import {
-  STACK_EXHAUSTED, astToJson, formatDiagnostic, isStackExhausted, parse, treeLines, type Diagnostic,
+  STACK_EXHAUSTED, astToJson, fixSource, formatDiagnostic, formatSource, isStackExhausted, parse, treeLines, type Diagnostic,
 } from "./frontend/index.ts";
 import { checkSource, elaborate, hostSources, readInterface, type CheckDiagnostic, type EffectSummary } from "./frontend/check/index.ts";
 import { referenceHostPath, standardLibrary } from "./frontend/check/node.ts";
@@ -30,6 +30,11 @@ Commands:
                             Compare old and new program texts against a ledger without
                             modifying it, reporting kept, opened, unreached, rescheduled,
                             form-changed, incompatible-answer, and loop differences.
+  fmt [--check] [--write] <file>...
+                            Format .norn files canonically ('-' reads standard input)
+  fix [--dry-run] [--migrate] [--host <file>] [--ledger <ledger.json>] <file>
+                            Apply high-confidence mechanical fixes (and with --ledger,
+                            verify empty ledger preview diff before modifying)
   help                      Show this help
 
 Exit status: 0 without errors (warnings allowed), 1 if a file has errors,
@@ -54,6 +59,10 @@ async function main(argv: string[]): Promise<number> {
         return await checkCommand(args);
       case "preview":
         return await previewCommand(args);
+      case "fmt":
+        return await fmtCommand(args);
+      case "fix":
+        return await fixCommand(args);
       default:
         throw new UsageError(`unknown command '${command}'\n\n${usage}`);
     }
@@ -328,6 +337,85 @@ function describeError(error: unknown): string {
   if (code === "ENOENT") return "no such file or directory";
   if (code === "EISDIR") return "it is a directory";
   return error instanceof Error ? error.message : String(error);
+}
+
+async function fmtCommand(args: string[]): Promise<number> {
+  let check = false;
+  let write = false;
+  const files: string[] = [];
+  for (const arg of args) {
+    if (arg === "--check") check = true;
+    else if (arg === "--write") write = true;
+    else if (arg.startsWith("-") && arg !== "-") throw new UsageError(`unknown option '${arg}' for fmt`);
+    else files.push(arg);
+  }
+  if (files.length === 0) throw new UsageError("fmt takes at least one file (or '-')");
+  let status = 0;
+  for (const file of files) {
+    const source = await read(file);
+    const formatted = formatSource(source);
+    if (!formatted.ok) {
+      report(formatted.diagnostics, source, displayName(file));
+      status = 1;
+      continue;
+    }
+    if (check) {
+      if (formatted.text !== source) {
+        process.stderr.write(`${displayName(file)}: not formatted\n`);
+        status = 1;
+      }
+    } else if (write && file !== "-") {
+      if (formatted.text !== source) writeFileSync(file, formatted.text, "utf8");
+    } else {
+      process.stdout.write(formatted.text);
+    }
+  }
+  return status;
+}
+
+async function fixCommand(args: string[]): Promise<number> {
+  let dryRun = false;
+  let migrate = false;
+  let hostOption: string | null = null;
+  let ledgerPath: string | null = null;
+  const files: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]!;
+    if (arg === "--dry-run") dryRun = true;
+    else if (arg === "--migrate") migrate = true;
+    else if (arg === "--host" || arg.startsWith("--host=")) {
+      hostOption = arg === "--host" ? (args[++i] ?? null) : arg.slice("--host=".length);
+    } else if (arg === "--ledger" || arg.startsWith("--ledger=")) {
+      ledgerPath = arg === "--ledger" ? (args[++i] ?? null) : arg.slice("--ledger=".length);
+    } else if (arg.startsWith("-") && arg !== "-") {
+      throw new UsageError(`unknown option '${arg}' for fix`);
+    } else {
+      files.push(arg);
+    }
+  }
+  if (files.length !== 1) throw new UsageError("fix takes exactly one file");
+  const file = files[0]!;
+  const hostPath = hostOption ?? referenceHostPath();
+  const hostSource = await read(hostPath);
+  const host = readInterface(hostSource, displayName(hostPath));
+  if (!host.ok) {
+    report(host.diagnostics, hostSource, displayName(hostPath));
+    return 1;
+  }
+  const std = standardLibrary(host);
+  const ledger = ledgerPath ? JSON.parse(await read(ledgerPath)) as Ledger : undefined;
+  const source = await read(file);
+  const result = fixSource(source, { host, std, migrate, ledger });
+  if (result.rejectedReason) {
+    process.stderr.write(`norn: ${result.rejectedReason}\n`);
+    return 1;
+  }
+  if (dryRun || file === "-") {
+    process.stdout.write(result.source);
+  } else if (result.changed) {
+    writeFileSync(file, result.source, "utf8");
+  }
+  return 0;
 }
 
 process.exitCode = await main(process.argv.slice(2));

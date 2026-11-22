@@ -11,7 +11,8 @@ export type Value =
   | { type: "closure"; node: string; environment: string }
   | { type: "builtin"; name: string }
   | { type: "request"; id: string }
-  | { type: "source"; kind: "fact" | "stream"; name: string; args: Value[]; labels: Record<string, Value> };
+  | { type: "source"; kind: "fact" | "stream"; name: string; args: Value[]; labels: Record<string, Value> }
+  | { type: "opaque"; library: string; typeName: string; value: Value };
 
 /** Plain data: what a ledger holds and what crosses a restart. */
 export type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
@@ -67,6 +68,7 @@ export function show(value: Value): string {
     case "closure": case "builtin": return "<function>";
     case "request": return `<request ${value.id}>`;
     case "source": return `<${value.kind} ${value.name}>`;
+    case "opaque": return `<${value.library}.${value.typeName}>`;
   }
 }
 /** Stable key for a value, independent of object insertion order: names a fact, a stream or a request's content. */

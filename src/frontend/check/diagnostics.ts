@@ -8,6 +8,18 @@ import type { Span } from "../ast.ts";
 
 export type Severity = "error" | "warning";
 
+export interface DiagnosticSecondary {
+  span: Span;
+  label: string;
+}
+
+export interface DiagnosticFix {
+  description: string;
+  /** High-confidence fixes may be applied automatically by `norn fix`; medium/low are advisory. */
+  confidence: "high" | "medium" | "low";
+  edits: { span: Span; replacement: string }[];
+}
+
 export interface CheckDiagnostic {
   severity: Severity;
   /** Stable: a skill or a document can explain it. CODES lists them all. */
@@ -20,6 +32,14 @@ export interface CheckDiagnostic {
   found?: string;
   /** When cases are not covered: example patterns that no case matches. */
   missing?: string[];
+  /** Related source spans for multi-location diagnostics. */
+  secondary?: DiagnosticSecondary[];
+  /** Suggested candidate names or choices. */
+  candidates?: string[];
+  /** Actionable hint, including TS/ReScript habit guidance. */
+  hint?: string;
+  /** Optional tiered machine-applicable fix. */
+  fix?: DiagnosticFix;
 }
 
 /** Every diagnostic code, with what it means. docs/types.md §9 lists the same. */
@@ -72,6 +92,18 @@ export const CODES = {
   "no-std": "open Std without the standard library",
   "std-error": "a standard library that does not type-check with this host",
   "too-deep": "a program that nests deeper than the checker's stack can follow",
+  "opaque-form": "an opaque type from another library cannot be requested as a run report form or decoded from JSON",
+  "opaque-equality": "an opaque type from another library does not expose == unless the library provides comparison",
+  "opaque-about": "an opaque type from another library cannot be passed directly to ~about",
+  "private-in-public": "a pub declaration references a private type from the same library",
+  "ambiguous-open": "a name is exported by more than one opened library; qualify it with Lib.name",
+  "shadowed-open": "an opened name cannot shadow an existing local binding",
+  "unknown-module": "a library or module name that is not available",
+  "unknown-export": "a name that is not exported (pub) by the referenced library",
+  "library-item": "a library top level may contain only type, let, let rec, open and needs declarations",
+  "library-effect": "a library top-level binding may not perform effects; wrap effectful work in a function",
+  "missing-needs": "a library requires a module via needs that was not supplied",
+  "type-hole": "a _ type hole inferred by the checker",
 } as const;
 
 export type Code = keyof typeof CODES;
