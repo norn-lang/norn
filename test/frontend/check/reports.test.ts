@@ -30,13 +30,15 @@ test("where nothing decides it, a run reports the host's report, and so does run
   assert.deepEqual(types(`let start = run\nlet r = start(@auto, "Task")\nignore(r->wait)`).r, "request<report>");
 });
 
-test("one call has one form: a function's callers agree on what its run reports", () => {
+test("generic helpers pass each call site's report form via evidence passing", () => {
   const helper = `${verdict}let review = who => run(who, "Review")->wait\n`;
-  assert.deepEqual(reports(`${helper}switch review(@codex) { | Answered(Sound) => () | _ => () }`).map((form) => form.text), ["verdict"]);
-  assert.match(
-    message(`${helper}switch review(@codex) { | Answered(Sound) => () | _ => () }\nswitch review(@grok) { | Answered("ok") => () | _ => () }`, "type-mismatch"),
-    /verdict/,
-  );
+  const one = check(`${helper}switch review(@codex) { | Answered(Sound) => () | _ => () }`);
+  assert.deepEqual(one.diagnostics, [], describe(one.diagnostics));
+  assert.deepEqual(one.formEvidence?.callSites.map((s) => s.form.text), ["verdict"]);
+
+  const two = check(`${helper}switch review(@codex) { | Answered(Sound) => () | _ => () }\nswitch review(@grok) { | Answered("ok") => () | _ => () }`);
+  assert.deepEqual(two.diagnostics, [], describe(two.diagnostics));
+  assert.deepEqual(two.formEvidence?.callSites.map((s) => s.form.text), ["verdict", "string"]);
 });
 
 test("a report is data: lists, tuples, records and the host's own types, never a function or a request", () => {

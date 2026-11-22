@@ -13,17 +13,19 @@
  */
 import type * as A from "../ast.ts";
 import { STACK_EXHAUSTED, isStackExhausted } from "../diagnostics.ts";
-import { t } from "./builtins.ts";
+import { builtinModuleExports, t } from "./builtins.ts";
 import { REMOVED_CONSTRUCTORS, REMOVED_NAMES, removedLabel } from "./removed.ts";
 import { TypeReader, TypeTable, declareTypes, externalType, type CtorInfo, type TypeInfo } from "./declarations.ts";
 import { both, closest, count, either, ordinal, sortDiagnostics, type CheckDiagnostic, type Code } from "./diagnostics.ts";
 import { effectsSummary, type EffectSummary } from "./effects.ts";
+import { validateEventKindAgainstManifests, type ConnectorManifest } from "./events.ts";
 import { analyzeMatch, type Row } from "./exhaustiveness.ts";
+import type { FormEvidencePlan } from "./elaborate.ts";
 import { formOf, type ReportForm } from "./forms.ts";
 import { binding, type HostInterface, type ValueBinding } from "./interface.ts";
 import {
   GENERIC, Namer, SOURCE, UnifyError, con, fun, generalize, instantiate, isReply, isRequest, newVar, printScheme, printType, rebuild, resolve, sameShape,
-  substitute, tuple, unify, type Clash, type ClassName, type TCon, type TFun, type TLabel, type Type,
+  substitute, tuple, unify, type Clash, type ClassName, type TCon, type TFun, type TLabel, type TVar, type Type,
 } from "./types.ts";
 
 /** A checked library (`Std`, application library, or Space library). */
@@ -62,6 +64,10 @@ export interface CheckOptions {
   std: Library | null;
   /** Named libraries available via `Lib.name`, `open Lib`, `open Lib.{a, b}`, or `needs Lib`. */
   libraries?: Readonly<Record<string, Library>>;
+  /** Optional connector manifests used to statically validate `Events.kind(app, kind)` and payload fields. */
+  manifests?: readonly ConnectorManifest[];
+  /** When true, emit a `default-report-form` warning when an unconstrained `run` falls back to host `report`. */
+  warnDefaultReport?: boolean;
 }
 
 export interface CheckResult {
@@ -73,13 +79,15 @@ export interface CheckResult {
   /** What the program may do, for review (§8); null when it has errors. */
   effects: EffectSummary[] | null;
   /** Each direct call of `run` and the form of its report (§5a); empty when the program has errors. */
-  reports: { node: A.Call | A.Pipe; form: ReportForm }[];
+  reports: { node: A.Call | A.Pipe; form: ReportForm; defaulted?: boolean }[];
+  /** Wadler-Blott evidence plan for generic helpers wrapping `run`. */
+  formEvidence?: FormEvidencePlan;
 }
 
 /** Checks a program against a host interface, `Std`, and any named libraries. */
 export function checkProgram(program: A.Program, options: CheckOptions): CheckResult {
   const libs = options.libraries ?? {};
-  const checker = new Checker(options.host, options.std, libs, null);
+  const checker = new Checker(options.host, options.std, libs, null, false, options.manifests ?? [], options.warnDefaultReport ?? false);
   checker.run(program);
   const diagnostics = sortDiagnostics(checker.diagnostics);
   const ok = !diagnostics.some((diagnostic) => diagnostic.severity === "error");
@@ -93,12 +101,14 @@ export function checkProgram(program: A.Program, options: CheckOptions): CheckRe
       return { ok: false, diagnostics, bindings: [], effects: null, reports: [] };
     }
   }
+  const hasEvidence = checker.formEvidence.lambdas.length > 0;
   return {
     ok,
     diagnostics,
     bindings: [...checker.topLevel.values()].map((b) => ({ name: b.name, type: printScheme(b.type) })),
     effects,
     reports: ok ? checker.reports : [],
+    ...(ok && hasEvidence ? { formEvidence: checker.formEvidence } : {}),
   };
 }
 
@@ -226,6 +236,9 @@ export class Checker {
   private readonly host: HostInterface;
   private readonly std: Library | null;
   private readonly libraries: Readonly<Record<string, Library>>;
+  private readonly builtinModules: Readonly<Record<string, readonly ValueBinding[]>>;
+  private readonly manifests: readonly ConnectorManifest[];
+  private readonly warnDefaultReport: boolean;
   private readonly libraryName: string | null;
   private readonly strictVisibility: boolean;
   private hasExplicitPub = false;
@@ -235,6 +248,7 @@ export class Checker {
   private readonly localTopLevel = new Set<string>();
   private level = 0;
   private readonly functions: FunctionContext[] = [];
+  private readonly lambdaStack: A.Lambda[] = [];
   private readonly matches: Match[] = [];
   /** Statements before the last of their block, with their types: none may be a request or a reply (§6a). */
   private readonly statementsBeforeLast: { node: A.Expression; type: Type }[] = [];
@@ -242,9 +256,19 @@ export class Checker {
   private readonly lets: { pattern: A.Pattern; bindings: ValueBinding[] }[] = [];
   private readonly patternTypes = new Map<A.Pattern, Type>();
   private readonly chooseOptions: { arg: A.Expression; element: Type }[] = [];
-  /** Each direct call of `run`, with the type of its report (§5a). */
-  private readonly runs: { node: A.Call | A.Pipe; report: Type }[] = [];
-  readonly reports: { node: A.Call | A.Pipe; form: ReportForm }[] = [];
+  /** Each direct call of `run`, with the type of its report (§5a) and enclosing lambda (if any). */
+  private readonly runs: { node: A.Call | A.Pipe; report: Type; enclosingLambda: A.Lambda | null }[] = [];
+  /** Calls to named functions whose lambdas contain polymorphic `run` calls, for Wadler-Blott evidence passing. */
+  private readonly genericFormLambdas = new Map<A.Lambda, { runNodes: (A.Call | A.Pipe)[]; formVar: TVar }>();
+  private readonly formCallSites: { node: A.Call | A.Pipe; lambda: A.Lambda; report: Type }[] = [];
+  /** `Events.kind(app, kind)` calls queued for manifest validation once types settle. */
+  private readonly eventKindCalls: { app: string; kind: string; payload: Type; span: A.Span }[] = [];
+  /** `JSON.decode(x)` calls queued for external opaque-type check. */
+  private readonly jsonDecodeCalls: { target: Type; span: A.Span }[] = [];
+  readonly reports: { node: A.Call | A.Pipe; form: ReportForm; defaulted?: boolean }[] = [];
+  readonly formEvidence: { lambdas: A.Lambda[]; forwardedRuns: (A.Call | A.Pipe)[]; callSites: { node: A.Call | A.Pipe; form: ReportForm }[] } = {
+    lambdas: [], forwardedRuns: [], callSites: [],
+  };
   /** Each direct request to a participant whose arguments are all literals, by what it asks of whom (spec §11.2). */
   private readonly literalRequests = new Map<string, A.Call | A.Pipe>();
   /** The program's last expression, if it has one: it must not be a request (§6a). */
@@ -263,13 +287,23 @@ export class Checker {
     libraries: Readonly<Record<string, Library>> = {},
     libraryName: string | null = null,
     strictVisibility = false,
+    manifests: readonly ConnectorManifest[] = [],
+    warnDefaultReport = false,
   ) {
     this.host = host;
     this.std = std;
     this.libraries = libraries;
+    this.manifests = manifests;
+    this.warnDefaultReport = warnDefaultReport;
     this.libraryName = libraryName;
     this.strictVisibility = strictVisibility;
     this.table = new TypeTable(host.table, libraryName);
+    const rawBuiltins = builtinModuleExports();
+    const wrapped: Record<string, ValueBinding[]> = {};
+    for (const [mod, items] of Object.entries(rawBuiltins)) {
+      wrapped[mod] = items.map((b) => binding({ name: b.name, type: b.type, origin: "builtin", library: mod, family: b.family }));
+    }
+    this.builtinModules = wrapped;
   }
 
   private lookupLibrary(name: string): Library | null {
@@ -400,6 +434,14 @@ export class Checker {
         const e = printType(expected, namer);
         const f = printType(found, namer);
         this.error("infinite-type", `expected ${e}${where}, found ${f}: the two can be equal only if a type contains itself`, span, { expected: e, found: f });
+        return;
+      }
+      case "missing-field": {
+        const f = printType(clash.type, namer);
+        const msg = clash.opaque
+          ? `expected a record with the field ${clash.field}${where}, found opaque type ${f}`
+          : `the type ${f} has no field ${clash.field}`;
+        this.error("missing-row-field", msg, span, { expected: `{${clash.field}: _, ..}`, found: f });
         return;
       }
       case "types": {
@@ -587,9 +629,25 @@ export class Checker {
     this.pattern(node.pattern, type, binder);
     this.level -= 1;
     const bindings = [...binder.names.values()];
+    // After checking a `let`, apply Haskell Rule 1 (value restriction): non-function bindings
+    // (such as `let r = run(...)->wait?`) do NOT generalize `form`-constrained type variables.
+    const isFunctionBinding = node.value.kind === "Lambda";
     for (const value of bindings) {
-      generalize(value.type, this.level);
+      if (isFunctionBinding || !hasFormVar(value.type)) generalize(value.type, this.level);
       if (node.pattern.kind === "VarPattern") value.lambda = this.functionOf(node.value);
+      if (value.lambda) {
+        const innerRuns = this.runs.filter((r) => r.enclosingLambda === value.lambda);
+        const genericRun = innerRuns.find((r) => {
+          const rv = resolve(r.report);
+          return rv.tag === "var" && rv.level === GENERIC;
+        });
+        if (genericRun) {
+          this.genericFormLambdas.set(value.lambda, {
+            runNodes: innerRuns.map((r) => r.node),
+            formVar: resolve(genericRun.report) as TVar,
+          });
+        }
+      }
       const boundValue: ValueBinding = this.libraryName !== null && topLevel
         ? { ...value, library: this.libraryName, visibility: node.visibility === "pub" ? "pub" : "private" }
         : value;
@@ -906,9 +964,10 @@ export class Checker {
   }
 
   private qualifiedIdentifier(node: A.QualifiedIdentifier): Type {
+    const builtinMod = this.builtinModules[node.module];
     const lib = this.lookupLibrary(node.module);
-    if (lib === null) {
-      const candidates = [...(this.std ? ["Std"] : []), ...Object.keys(this.libraries)];
+    if (lib === null && !builtinMod) {
+      const candidates = [...(this.std ? ["Std"] : []), ...Object.keys(this.builtinModules), ...Object.keys(this.libraries)];
       const near = closest(node.module, candidates);
       this.error(
         "unknown-module",
@@ -918,9 +977,10 @@ export class Checker {
       );
       return newVar(this.level);
     }
-    const found = lib.exports.find((b) => b.name === node.name);
+    const exportsList = lib ? lib.exports : builtinMod!;
+    const found = exportsList.find((b) => b.name === node.name);
     if (!found) {
-      const exportNames = lib.exports.map((b) => b.name);
+      const exportNames = exportsList.map((b) => b.name);
       const near = closest(node.name, exportNames);
       this.error(
         "unknown-export",
@@ -1010,10 +1070,25 @@ export class Checker {
     }
     if (name !== null && callee.binding?.origin === "builtin" && ["ask", "confirm", "choose", "run"].includes(name)) this.sameRequest(node, name, first?.expression ?? null, args);
     if (isBuiltin(callee, "run")) {
-      // One call, one form: the report's type is never generalized, so every use of the enclosing function agrees on it.
       const report = this.reportOf(shape);
-      unify(report, newVar(0), this.table);
-      this.runs.push({ node, report });
+      const reportVar = resolve(report);
+      if (reportVar.tag === "var") reportVar.form = true;
+      const enclosingLambda = this.lambdaStack.at(-1) ?? null;
+      // Haskell Rule 1: non-function value bindings do not generalize `run`'s report type;
+      // functions wrapping `run` keep their report variable polymorphic (`'a: form`) for evidence passing.
+      if (enclosingLambda === null) unify(report, newVar(0), this.table);
+      this.runs.push({ node, report, enclosingLambda });
+    }
+    // Wadler-Blott call-site tracking for generic helpers wrapping `run`.
+    if (callee.binding?.lambda && this.genericFormLambdas.has(callee.binding.lambda)) {
+      const resultType = shape.result;
+      const resolvedRes = resolve(resultType);
+      const reportAtCall = resolvedRes.tag === "con" && resolvedRes.name === "reply"
+        ? resolvedRes.args[0]!
+        : isRequest(resolvedRes) && resolvedRes.tag === "con"
+          ? (resolve(resolvedRes.args[1]!) as TCon).args[0]!
+          : resolvedRes;
+      this.formCallSites.push({ node, lambda: callee.binding.lambda, report: reportAtCall });
     }
     const positional = args.filter((arg): arg is A.Expression => arg.kind !== "LabelledArg");
     const given = positional.length + (first === null ? 0 : 1);
@@ -1083,6 +1158,20 @@ export class Checker {
         node.span,
         { expected: list },
       );
+    }
+    if (callee.binding?.library === "Events" && callee.binding.name === "kind" && first === null) {
+      const [appArg, kindArg] = positional;
+      if (appArg?.kind === "StringLiteral" && kindArg?.kind === "StringLiteral") {
+        const res = resolve(shape.result);
+        const payload = res.tag === "con" && res.args[0] ? res.args[0] : newVar(this.level);
+        this.eventKindCalls.push({ app: appArg.value, kind: kindArg.value, payload, span: node.span });
+      }
+    }
+    if (callee.binding?.library === "JSON" && callee.binding.name === "decode") {
+      const res = resolve(shape.result);
+      if (res.tag === "con" && res.name === "result" && res.args[0]) {
+        this.jsonDecodeCalls.push({ target: res.args[0], span: node.span });
+      }
     }
     return shape.result;
   }
@@ -1259,22 +1348,35 @@ export class Checker {
     this.error("unknown-field", `no record type has all of the fields ${both(names)}: ${owners.join("; ")}`, node.span);
   }
 
-  /** `x.f`: the field comes from the type of `x`, or, while that is unknown, from the latest declared record type with a field `f`. */
+  /** `x.f`: reads field `f` via row presence constraint `'r: {f: 'a, ..}` when `x`'s record type is not yet known (order-independent). */
   private field(node: A.FieldAccess, recordType: Type): Type {
     const span = fieldSpan(node);
     const shape = resolve(recordType);
     let info = shape.tag === "con" ? this.table.lookupType(shape.name) ?? null : null;
     let args: readonly Type[] = shape.tag === "con" ? shape.args : [];
     if (shape.tag === "var") {
-      info = this.table.recordWith([node.field]);
-      if (info === null) {
+      const matching = this.table.recordsWithAll([node.field]);
+      if (matching.length === 0) {
         const near = closest(node.field, this.table.records.filter((r) => !this.table.isSealedOpaque(r)).flatMap((record) => record.fields.map((field) => field.name)));
         this.error("unknown-field", `unknown field ${node.field}: no record type has it${near === null ? "" : `; did you mean ${near}?`}`, span);
         return newVar(this.level);
       }
-      args = info.params.map(() => newVar(this.level));
-      const canonical = info.opaque && info.library ? `${info.library}.${info.name}` : info.name;
-      this.expect(recordType, con(canonical, ...args), node.record.span, { where: `for the record whose field ${node.field} is read` });
+      // If a unique accessible record declares this field, unify directly (order-independent);
+      // if multiple records share the field, attach a row presence constraint `'r: {f: 'a, ..}`.
+      if (matching.length === 1 && !shape.fields?.size) {
+        const only = matching[0]!;
+        info = only;
+        args = only.params.map(() => newVar(this.level));
+        const canonical = only.opaque && only.library ? `${only.library}.${only.name}` : only.name;
+        this.expect(recordType, con(canonical, ...args), node.record.span, { where: `for the record whose field ${node.field} is read` });
+      } else {
+        const existing = shape.fields?.get(node.field);
+        if (existing !== undefined) return existing;
+        const fieldType = newVar(Math.min(this.level, shape.level));
+        shape.fields ??= new Map();
+        shape.fields.set(node.field, fieldType);
+        return fieldType;
+      }
     } else if (info?.kind !== "record" || this.table.isSealedOpaque(info)) {
       const found = printType(shape);
       const hint = info && this.table.isSealedOpaque(info)
@@ -1460,9 +1562,11 @@ export class Checker {
       labels.push({ label: param.label, type, optional: param.defaultValue !== null });
     });
     this.functions.push(context);
+    this.lambdaStack.push(node);
     const body = node.body.kind === "RecordLiteral"
       ? this.record(node.body, context.returnType)
       : this.infer(node.body);
+    this.lambdaStack.pop();
     this.functions.pop();
     this.expect(body, context.returnType, valueSpan(node.body), {
       where: "as the result of this function",
@@ -1743,8 +1847,36 @@ export class Checker {
         { expected: "list<'a> where 'a is a variant type", found },
       );
     }
-    for (const { node, report } of this.runs) {
-      if (resolve(report).tag === "var") unify(report, con("report"), this.table);
+    for (const { node, report, enclosingLambda } of this.runs) {
+      const resolved = resolve(report);
+      // Skip `run` calls inside a generic form-evidence helper: their forms are passed from call sites via `~__form`.
+      if (enclosingLambda && this.genericFormLambdas.has(enclosingLambda) && resolved.tag === "var" && resolved.level === GENERIC) {
+        if (!this.formEvidence.lambdas.includes(enclosingLambda)) this.formEvidence.lambdas.push(enclosingLambda);
+        this.formEvidence.forwardedRuns.push(node);
+        continue;
+      }
+      let defaulted = false;
+      if (resolved.tag === "var") {
+        // Resolve row-constrained `run` reports to a matching record if unambiguous, else default host `report`.
+        if (resolved.fields && resolved.fields.size > 0) {
+          const matching = this.table.recordsWithAll([...resolved.fields.keys()]);
+          if (matching.length > 0) {
+            const picked = matching.at(-1)!;
+            const args = picked.params.map(() => newVar(0));
+            const canonical = picked.opaque && picked.library ? `${picked.library}.${picked.name}` : picked.name;
+            this.expect(report, con(canonical, ...args), node.span, { where: "for the report of this run" });
+          } else {
+            defaulted = true;
+            unify(report, con("report"), this.table);
+          }
+        } else {
+          defaulted = true;
+          unify(report, con("report"), this.table);
+          if (this.warnDefaultReport) {
+            this.warning("default-report-form", "this run's report type was not constrained and defaults to the host report", node.span);
+          }
+        }
+      }
       const form = formOf(report, this.table);
       if (typeof form === "object" && "opaque" in form) {
         const found = printType(resolve(report));
@@ -1756,7 +1888,7 @@ export class Checker {
         );
         continue;
       }
-      if (typeof form !== "string") { this.reports.push({ node, form }); continue; }
+      if (typeof form !== "string") { this.reports.push({ node, form, ...(defaulted ? { defaulted: true } : {}) }); continue; }
       const found = printType(resolve(report));
       this.error(
         "report-form",
@@ -1766,6 +1898,54 @@ export class Checker {
         node.span,
         { found },
       );
+    }
+    // Resolve concrete ReportForm at each call site of a generic form helper.
+    for (const site of this.formCallSites) {
+      const resolved = resolve(site.report);
+      if (resolved.tag === "var") {
+        if (resolved.fields && resolved.fields.size > 0) {
+          const matching = this.table.recordsWithAll([...resolved.fields.keys()]);
+          if (matching.length > 0) {
+            const picked = matching.at(-1)!;
+            const args = picked.params.map(() => newVar(0));
+            const canonical = picked.opaque && picked.library ? `${picked.library}.${picked.name}` : picked.name;
+            this.expect(site.report, con(canonical, ...args), site.node.span, { where: "for the report at this call site" });
+          } else {
+            unify(site.report, con("report"), this.table);
+          }
+        } else {
+          unify(site.report, con("report"), this.table);
+        }
+      }
+      const form = formOf(site.report, this.table);
+      if (typeof form === "object" && "opaque" in form) {
+        this.error(
+          "opaque-form",
+          `this call cannot report opaque type ${form.library}.${form.name}: only ${form.library} can construct ${form.name}`,
+          site.node.span,
+        );
+      } else if (typeof form === "string") {
+        this.error("report-form", `this call would report ${printType(resolve(site.report))}, which holds ${form}`, site.node.span);
+      } else {
+        this.formEvidence.callSites.push({ node: site.node, form });
+      }
+    }
+    // Validate `Events.kind(app, kind)` calls against connector manifests.
+    for (const ev of this.eventKindCalls) {
+      for (const d of validateEventKindAgainstManifests(ev.app, ev.kind, ev.payload, ev.span, this.table, this.manifests)) {
+        this.diagnostics.push(d);
+      }
+    }
+    // Anti-leakage rule 1 for `JSON.decode`: cannot decode into an external opaque type.
+    for (const dec of this.jsonDecodeCalls) {
+      const form = formOf(dec.target, this.table);
+      if (typeof form === "object" && "opaque" in form) {
+        this.error(
+          "opaque-form",
+          `JSON.decode cannot construct opaque type ${form.library}.${form.name}: only ${form.library} can construct ${form.name}`,
+          dec.span,
+        );
+      }
     }
     for (const match of this.matches) if (!match.broken) this.analyze(match);
     this.drops();
@@ -1963,6 +2143,28 @@ function unwrapHint(expected: Type, found: Type): string {
   if (!families.includes(f.name)) return "";
   if (e.tag === "con" && families.includes(e.name)) return "";
   return `; take the value out of the ${f.name} with ? or switch`;
+}
+
+/** Whether a type contains an ungeneralized `form`-constrained type variable (Haskell Rule 1 value restriction). */
+function hasFormVar(root: Type): boolean {
+  const seen = new Set<Type>();
+  const stack: Type[] = [root];
+  while (stack.length > 0) {
+    const cur = resolve(stack.pop()!);
+    if (seen.has(cur)) continue;
+    seen.add(cur);
+    if (cur.tag === "var") {
+      if (cur.form) return true;
+      if (cur.fields) for (const ft of cur.fields.values()) stack.push(ft);
+    } else if (cur.tag === "con") {
+      stack.push(...cur.args);
+    } else if (cur.tag === "tuple") {
+      stack.push(...cur.elements);
+    } else if (cur.tag === "fun") {
+      stack.push(...cur.params, ...cur.labels.map((l) => l.type), cur.result);
+    }
+  }
+  return false;
 }
 
 /** Whether a call's callee is the built-in of this name. */

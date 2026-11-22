@@ -1,0 +1,20 @@
+// Standard Capability Interface: Events (CloudEvents 1.0.2)
+//
+// Hosts implement this interface to deliver external events from connected apps
+// without putting any app names or business verbs into the host interface.
+
+type kind<'a>
+
+type envelope<'a> = {
+  specversion: string,
+  kind: string,
+  source: string,
+  id: string,
+  occurredAt: option<time>,
+  subject: option<string>,
+  receivedAt: time,
+  data: 'a,
+}
+
+external kind: (string, string) => kind<'a>
+external events: (kind<'a>, ~source: string=?, ~subject: string=?) => stream<envelope<'a>>

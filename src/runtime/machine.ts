@@ -45,7 +45,7 @@ export interface Machine {
   resumedAt: number;
 }
 const effectBuiltins = new Set(["ask", "confirm", "choose", "run", "wait", "waitUntil", "cancel", "handOver", "status", "say", "judge", "first"]);
-const builtins = new Set([...effectBuiltins, "now", "show", "ignore", "fail", "or", "never", "map", "filter", "filterMap", "gather", "forEach", "anyOf"]);
+const builtins = new Set([...effectBuiltins, "now", "show", "ignore", "fail", "or", "never", "map", "filter", "filterMap", "gather", "forEach", "anyOf", "accepting"]);
 
 export function start(code: Code, now = 0): Machine {
   return { control: { kind: "eval", node: code.root, env: "e0" }, frames: [],
@@ -254,6 +254,24 @@ function builtin(code: Code, machine: Machine, name: string, args: Value[], labe
       if (args.length !== 1 || Object.keys(labels).length || args[0].type !== "source" || args[0].kind !== "stream") throw new Error("gather needs one stream");
       value = { type: "source", kind: "stream", name, args, labels }; break;
     }
+    case "accepting": {
+      if (args.length !== 2 || Object.keys(labels).length || args[0].type !== "request" || !["closure", "builtin"].includes(args[1].type)) {
+        throw new Error("accepting needs a request and a pure validator function");
+      }
+      value = { type: "request", id: args[0].id, validators: [...(args[0].validators ?? []), args[1]] }; break;
+    }
+    case "Events.kind": {
+      if (args.length !== 2 || args[0].type !== "string" || args[1].type !== "string" || Object.keys(labels).length) {
+        throw new Error("Events.kind needs app and kind strings");
+      }
+      value = variant("EventKind", args[0], args[1]); break;
+    }
+    case "Events.events": {
+      if (args.length !== 1 || args[0].type !== "variant" || args[0].name !== "EventKind") {
+        throw new Error("Events.events needs an Events.kind value");
+      }
+      value = { type: "source", kind: "stream", name: "Events.events", args, labels }; break;
+    }
     case "forEach": {
       if (args.length !== 2 || args[0].type !== "source" || args[0].kind !== "stream") throw new Error("forEach needs a stream and callback");
       const { key, ...restLabels } = labels;
@@ -263,9 +281,211 @@ function builtin(code: Code, machine: Machine, name: string, args: Value[], labe
       machine.frames.push({ kind: "forEach", stream: args[0], callback: args[1], loopKey, stage: "waiting" });
       machine.control = { kind: "effect", effect: { name: "wait", args: [args[0]], labels: {}, loop: "begins", loopKey } }; return;
     }
-    default: throw new Error(`Unknown built-in ${name}`);
+    default: {
+      const modResult = evalBuiltinModule(code, machine, name, args, labels);
+      if (modResult !== null) { value = modResult; break; }
+      throw new Error(`Unknown built-in ${name}`);
+    }
   }
   machine.control = { kind: "value", value };
+}
+
+function jsonToValue(raw: unknown): Value {
+  if (raw === null || raw === undefined) return unit;
+  if (typeof raw === "boolean") return { type: "bool", value: raw };
+  if (typeof raw === "number") return Number.isInteger(raw) ? { type: "int", value: String(raw) } : number(raw);
+  if (typeof raw === "string") return text(raw);
+  if (Array.isArray(raw)) return { type: "list", values: raw.map(jsonToValue) };
+  if (typeof raw === "object") {
+    const fields: Record<string, Value> = {};
+    for (const [k, v] of Object.entries(raw as Record<string, unknown>)) fields[k] = jsonToValue(v);
+    return { type: "record", fields };
+  }
+  return unit;
+}
+
+function valueToJson(val: Value): unknown {
+  switch (val.type) {
+    case "unit": return null;
+    case "bool": return val.value;
+    case "string": return val.value;
+    case "int": return Number(val.value);
+    case "float": return Number(val.value);
+    case "time": return new Date(Number(val.value)).toISOString();
+    case "duration": return Number(val.value);
+    case "list": case "tuple": return val.values.map(valueToJson);
+    case "record": return Object.fromEntries(Object.entries(val.fields).map(([k, v]) => [k, valueToJson(v)]));
+    case "variant": return val.args.length === 0 ? val.name : { [val.name]: val.args.map(valueToJson) };
+    case "opaque": return `<${val.library}.${val.typeName}>`;
+    default: return show(val);
+  }
+}
+
+function evalBuiltinModule(code: Code, machine: Machine, name: string, args: Value[], labels: Record<string, Value>): Value | null {
+  if (!name.includes(".") || Object.keys(labels).length) return null;
+  switch (name) {
+    case "String.toLowerCase":
+      if (args.length !== 1 || args[0].type !== "string") throw new Error("String.toLowerCase needs a string");
+      return text(args[0].value.toLowerCase());
+    case "String.toUpperCase":
+      if (args.length !== 1 || args[0].type !== "string") throw new Error("String.toUpperCase needs a string");
+      return text(args[0].value.toUpperCase());
+    case "String.includes":
+      if (args.length !== 2 || args[0].type !== "string" || args[1].type !== "string") throw new Error("String.includes needs two strings");
+      return { type: "bool", value: args[0].value.includes(args[1].value) };
+    case "String.startsWith":
+      if (args.length !== 2 || args[0].type !== "string" || args[1].type !== "string") throw new Error("String.startsWith needs two strings");
+      return { type: "bool", value: args[0].value.startsWith(args[1].value) };
+    case "String.endsWith":
+      if (args.length !== 2 || args[0].type !== "string" || args[1].type !== "string") throw new Error("String.endsWith needs two strings");
+      return { type: "bool", value: args[0].value.endsWith(args[1].value) };
+    case "String.trim":
+      if (args.length !== 1 || args[0].type !== "string") throw new Error("String.trim needs a string");
+      return text(args[0].value.trim());
+    case "String.split":
+      if (args.length !== 2 || args[0].type !== "string" || args[1].type !== "string") throw new Error("String.split needs two strings");
+      return { type: "list", values: args[0].value.split(args[1].value).map(text) };
+    case "String.length":
+      if (args.length !== 1 || args[0].type !== "string") throw new Error("String.length needs a string");
+      return { type: "int", value: String([...args[0].value].length) };
+    case "String.slice":
+      if (args.length !== 3 || args[0].type !== "string" || args[1].type !== "int" || args[2].type !== "int") throw new Error("String.slice needs string, int, int");
+      return text([...args[0].value].slice(Number(args[1].value), Number(args[2].value)).join(""));
+    case "List.map": {
+      if (args.length !== 2 || args[0].type !== "list") throw new Error("List.map needs a list and function");
+      return { type: "list", values: args[0].values.map((item) => runPure(code, args[1], item, machine, machine.resumedAt)) };
+    }
+    case "List.filter": {
+      if (args.length !== 2 || args[0].type !== "list") throw new Error("List.filter needs a list and function");
+      return { type: "list", values: args[0].values.filter((item) => bool(runPure(code, args[1], item, machine, machine.resumedAt))) };
+    }
+    case "List.filterMap": {
+      if (args.length !== 2 || args[0].type !== "list") throw new Error("List.filterMap needs a list and function");
+      const out: Value[] = [];
+      for (const item of args[0].values) {
+        const res = runPure(code, args[1], item, machine, machine.resumedAt);
+        if (res.type === "variant" && res.name === "Some" && res.args.length === 1) out.push(res.args[0]!);
+      }
+      return { type: "list", values: out };
+    }
+    case "List.some": {
+      if (args.length !== 2 || args[0].type !== "list") throw new Error("List.some needs a list and function");
+      return { type: "bool", value: args[0].values.some((item) => bool(runPure(code, args[1], item, machine, machine.resumedAt))) };
+    }
+    case "List.every": {
+      if (args.length !== 2 || args[0].type !== "list") throw new Error("List.every needs a list and function");
+      return { type: "bool", value: args[0].values.every((item) => bool(runPure(code, args[1], item, machine, machine.resumedAt))) };
+    }
+    case "List.includes": {
+      if (args.length !== 2 || args[0].type !== "list") throw new Error("List.includes needs a list and value");
+      return { type: "bool", value: args[0].values.some((item) => equal(item, args[1])) };
+    }
+    case "List.find": {
+      if (args.length !== 2 || args[0].type !== "list") throw new Error("List.find needs a list and function");
+      for (const item of args[0].values) {
+        if (bool(runPure(code, args[1], item, machine, machine.resumedAt))) return variant("Some", item);
+      }
+      return variant("None");
+    }
+    case "List.fold": {
+      if (args.length !== 3 || args[0].type !== "list") throw new Error("List.fold needs a list, initial value, and function");
+      let acc = args[1];
+      for (const item of args[0].values) acc = runPureMulti(code, machine, args[2], [acc, item]);
+      return acc;
+    }
+    case "List.length":
+      if (args.length !== 1 || args[0].type !== "list") throw new Error("List.length needs a list");
+      return { type: "int", value: String(args[0].values.length) };
+    case "List.concat":
+      if (args.length !== 2 || args[0].type !== "list" || args[1].type !== "list") throw new Error("List.concat needs two lists");
+      return { type: "list", values: [...args[0].values, ...args[1].values] };
+    case "List.flatten": {
+      if (args.length !== 1 || args[0].type !== "list") throw new Error("List.flatten needs a list of lists");
+      const out: Value[] = [];
+      for (const item of args[0].values) {
+        if (item.type !== "list") throw new Error("List.flatten needs a list of lists");
+        out.push(...item.values);
+      }
+      return { type: "list", values: out };
+    }
+    case "Option.map":
+      if (args.length !== 2 || args[0].type !== "variant") throw new Error("Option.map needs an option and function");
+      return args[0].name === "Some" ? variant("Some", runPure(code, args[1], args[0].args[0]!, machine, machine.resumedAt)) : variant("None");
+    case "Option.flatMap":
+      if (args.length !== 2 || args[0].type !== "variant") throw new Error("Option.flatMap needs an option and function");
+      return args[0].name === "Some" ? runPure(code, args[1], args[0].args[0]!, machine, machine.resumedAt) : variant("None");
+    case "Option.withDefault":
+      if (args.length !== 2 || args[0].type !== "variant") throw new Error("Option.withDefault needs an option and default");
+      return args[0].name === "Some" ? args[0].args[0]! : args[1];
+    case "Option.isSome":
+      if (args.length !== 1 || args[0].type !== "variant") throw new Error("Option.isSome needs an option");
+      return { type: "bool", value: args[0].name === "Some" };
+    case "Option.isNone":
+      if (args.length !== 1 || args[0].type !== "variant") throw new Error("Option.isNone needs an option");
+      return { type: "bool", value: args[0].name === "None" };
+    case "Result.map":
+      if (args.length !== 2 || args[0].type !== "variant") throw new Error("Result.map needs a result and function");
+      return args[0].name === "Ok" ? variant("Ok", runPure(code, args[1], args[0].args[0]!, machine, machine.resumedAt)) : args[0];
+    case "Result.flatMap":
+      if (args.length !== 2 || args[0].type !== "variant") throw new Error("Result.flatMap needs a result and function");
+      return args[0].name === "Ok" ? runPure(code, args[1], args[0].args[0]!, machine, machine.resumedAt) : args[0];
+    case "Result.mapError":
+      if (args.length !== 2 || args[0].type !== "variant") throw new Error("Result.mapError needs a result and function");
+      return args[0].name === "Error" ? variant("Error", runPure(code, args[1], args[0].args[0]!, machine, machine.resumedAt)) : args[0];
+    case "Result.withDefault":
+      if (args.length !== 2 || args[0].type !== "variant") throw new Error("Result.withDefault needs a result and default");
+      return args[0].name === "Ok" ? args[0].args[0]! : args[1];
+    case "Result.isOk":
+      if (args.length !== 1 || args[0].type !== "variant") throw new Error("Result.isOk needs a result");
+      return { type: "bool", value: args[0].name === "Ok" };
+    case "Result.isError":
+      if (args.length !== 1 || args[0].type !== "variant") throw new Error("Result.isError needs a result");
+      return { type: "bool", value: args[0].name === "Error" };
+    case "JSON.encode":
+      if (args.length !== 1) throw new Error("JSON.encode needs one argument");
+      return text(JSON.stringify(valueToJson(args[0])));
+    case "JSON.decode":
+      if (args.length !== 1) throw new Error("JSON.decode needs one json value");
+      if (args[0].type === "string") {
+        try { return variant("Ok", jsonToValue(JSON.parse(args[0].value))); }
+        catch (err) { return variant("Error", text(err instanceof Error ? err.message : String(err))); }
+      }
+      return variant("Ok", args[0]);
+    case "JSON.get":
+      if (args.length !== 2 || args[1].type !== "string") throw new Error("JSON.get needs json and key");
+      if (args[0].type === "record" && Object.hasOwn(args[0].fields, args[1].value)) return variant("Some", args[0].fields[args[1].value]!);
+      return variant("None");
+    case "JSON.asString":
+      return args[0]?.type === "string" ? variant("Some", args[0]) : variant("None");
+    case "JSON.asInt":
+      return args[0]?.type === "int" ? variant("Some", args[0]) : variant("None");
+    case "JSON.asFloat":
+      return args[0]?.type === "float" ? variant("Some", args[0]) : args[0]?.type === "int" ? variant("Some", number(Number(args[0].value))) : variant("None");
+    case "JSON.asBool":
+      return args[0]?.type === "bool" ? variant("Some", args[0]) : variant("None");
+    case "JSON.asList":
+      return args[0]?.type === "list" ? variant("Some", args[0]) : variant("None");
+    default:
+      return null;
+  }
+}
+
+function runPureMulti(code: Code, parent: Machine, fn: Value, args: Value[], maxSteps = 100_000): Value {
+  const sub: Machine = {
+    control: { kind: "value", value: unit },
+    frames: [{ kind: "pureReturn" }],
+    environments: parent.environments,
+    nextEnvironment: parent.nextEnvironment,
+    resumedAt: parent.resumedAt,
+  };
+  invoke(code, sub, fn, args, Object.create(null));
+  advance(code, sub, maxSteps);
+  parent.nextEnvironment = sub.nextEnvironment;
+  if (sub.control.kind === "done") return sub.control.value;
+  if (sub.control.kind === "effect") throw new Error(`Pure callback cannot perform effect ${sub.control.effect.name}`);
+  if (sub.control.kind === "error") throw new Error(sub.control.message);
+  if (sub.control.kind === "failed") throw new Error(`Pure callback failed with ${show(sub.control.outcome)}`);
+  throw new Error("Pure callback exceeded step budget");
 }
 function choose(code: Code, machine: Machine, value: Value, cases: string[], env: string): void {
   for (let i = 0; i < cases.length; i++) {
@@ -297,6 +517,7 @@ function evaluate(code: Code, machine: Machine, node: AstNode, env: string): voi
       parent.env = local; machine.control = { kind: "value", value: unit }; break;
     }
     case "Identifier": machine.control = { kind: "value", value: lookup(code, machine, env, node.name) }; break;
+    case "QualifiedIdentifier": machine.control = { kind: "value", value: { type: "builtin", name: `${node.module}.${node.name}` } }; break;
     case "Lambda": machine.control = { kind: "value", value: { type: "closure", node: code.nodeId(node), environment: env } }; break;
     case "Constructor": collect(code, machine, node, node.args, env); break;
     case "TupleLiteral": collect(code, machine, node, node.elements, env); break;
