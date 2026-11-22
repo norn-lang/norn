@@ -5,7 +5,8 @@
 import type * as A from "../ast.ts";
 import { closest, type CheckDiagnostic } from "./diagnostics.ts";
 import type { TypeTable } from "./declarations.ts";
-import { resolve, type Type } from "./types.ts";
+import type { Form, ReportForm } from "./forms.ts";
+import { printType, resolve, type Type } from "./types.ts";
 
 /** Canonical `interfaces/events.norn` definition (embedded for browser safety). */
 export const EVENTS_INTERFACE_SOURCE = `// Standard Capability Interface: Events (CloudEvents 1.0.2)
@@ -87,10 +88,12 @@ export function validateEventKindAgainstManifests(
   if (resolved.tag !== "con") return [];
   const info = table.lookupType(resolved.name);
   if (!info || info.kind !== "record") return [];
+  const manifestFields = new Map(eventSpec.fields.map((f) => [f.name, f]));
   const manifestFieldNames = eventSpec.fields.map((f) => f.name);
   const diagnostics: CheckDiagnostic[] = [];
   for (const field of info.fields) {
-    if (!manifestFieldNames.includes(field.name)) {
+    const spec = manifestFields.get(field.name);
+    if (!spec) {
       const near = closest(field.name, manifestFieldNames);
       diagnostics.push({
         severity: "error",
@@ -99,7 +102,48 @@ export function validateEventKindAgainstManifests(
         span,
         candidates: manifestFieldNames,
       });
+      continue;
+    }
+    const actual = printType(resolve(field.type)).replace(/\s+/gu, "");
+    const expected = spec.type.replace(/\s+/gu, "");
+    const expectedOptional = spec.required === false ? `option<${expected}>` : null;
+    if (actual !== "json" && expected !== "json" && actual !== expected && actual !== expectedOptional) {
+      diagnostics.push({
+        severity: "error",
+        code: "manifest-field-mismatch",
+        message: `event ${app}:${kindName} field ${field.name} has type ${spec.type} in its connector manifest, but program expects ${printType(resolve(field.type))}`,
+        span,
+        expected: spec.type,
+        found: printType(resolve(field.type)),
+      });
     }
   }
   return diagnostics;
+}
+
+function parseManifestFieldForm(typeExpr: string): Form {
+  const trimmed = typeExpr.trim();
+  const listMatch = /^list<(.+)>$/u.exec(trimmed);
+  if (listMatch) return { kind: "list", element: parseManifestFieldForm(listMatch[1]!) };
+  if (trimmed === "json") return { kind: "any" };
+  if (["string", "int", "float", "bool", "time", "duration", "unit"].includes(trimmed)) {
+    return { kind: "base", name: trimmed };
+  }
+  return { kind: "any" };
+}
+
+/** Builds a runtime `ReportForm` from a `ConnectorEventSpec` for `deliverEvent(..., { form })` validation. */
+export function manifestEventForm(spec: ConnectorEventSpec): ReportForm {
+  const requiredFields = spec.fields.filter((f) => f.required !== false);
+  const typeName = `event:${spec.kind}`;
+  return {
+    text: `{${requiredFields.map((f) => `${f.name}: ${f.type}`).join(", ")}}`,
+    form: { kind: "named", name: typeName },
+    definitions: {
+      [typeName]: {
+        kind: "record",
+        fields: requiredFields.map((f) => ({ name: f.name, form: parseManifestFieldForm(f.type) })),
+      },
+    },
+  };
 }
