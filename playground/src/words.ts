@@ -82,6 +82,8 @@ export function literal(value: Value): string {
       return `(${value.values.map(literal).join(", ")})`;
     case "record":
       return `{${Object.entries(value.fields).map(([name, field]) => `${name}: ${literal(field)}`).join(", ")}}`;
+    case "opaque":
+      return `<${value.library}.${value.typeName}>`;
     case "closure":
     case "builtin":
       return "a function";

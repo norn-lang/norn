@@ -33,7 +33,7 @@ export function* treeLines(root: AstNode): Generator<string> {
     const fields = node as unknown as { [field: string]: unknown };
     for (const field of NODE_FIELDS[node.kind] as readonly string[]) {
       const value = fields[field];
-      if (value === null || (Array.isArray(value) && value.length === 0)) continue;
+      if (value === undefined || value === null || (Array.isArray(value) && value.length === 0)) continue;
       if (isNode(value)) {
         children.push({ node: value, indent: `${indent}  `, label: `${field}: ` });
       } else if (Array.isArray(value) && value.every(isNode)) {

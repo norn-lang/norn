@@ -1,7 +1,7 @@
 import { NODE_FIELDS, type AstNode, type Program } from "../frontend/ast.ts";
 import { astToJson, astFromJson } from "../frontend/json.ts";
 import { sha256 } from "./sha256.ts";
-import { linkStd, requireLinked } from "./std.ts";
+import { linkLibraries, requireLinked } from "./std.ts";
 
 /** A program ready to evaluate: its frozen AST, with stable node IDs and a content identity. */
 export interface Code {
@@ -18,8 +18,8 @@ export type Sources = Readonly<Record<string, "fact" | "stream">>;
 /** The reference host's sources (hosts/reference.norn): what a program compiled for no named host may wait on. */
 export const REFERENCE_SOURCES: Sources = Object.freeze({ merged: "fact", released: "fact", machineUpdated: "fact", replied: "fact",
   runEnded: "fact", ciFailed: "stream", prActivity: "stream", docChanged: "stream", message: "stream" });
-export function compile(program: Program, options: {std?: Program; sources?: Sources} = {}): Code {
-  return compileAstJson(astToJson(linkStd(program, options.std)), options.sources);
+export function compile(program: Program, options: { std?: Program; libraries?: Readonly<Record<string, Program>>; sources?: Sources } = {}): Code {
+  return compileAstJson(astToJson(linkLibraries(program, { std: options.std, libraries: options.libraries })), options.sources);
 }
 
 /** Load an existing definition without recoding the bytes that name it. */

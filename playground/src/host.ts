@@ -184,6 +184,8 @@ export function describe(type: A.TypeExpression): string {
       return type.args.length === 0 ? type.name : `${type.name}<${type.args.map(describe).join(", ")}>`;
     case "TypeVar":
       return `'${type.name}`;
+    case "TypeHole":
+      return "_";
     case "TupleType":
       return `(${type.elements.map(describe).join(", ")})`;
     case "FunctionType":

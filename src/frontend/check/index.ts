@@ -13,10 +13,14 @@
  * this repository's files.
  */
 export { FAMILIES, type Family } from "./builtins.ts";
-export { CODES, type CheckDiagnostic, type Code, type Severity } from "./diagnostics.ts";
+export { CODES, type CheckDiagnostic, type Code, type DiagnosticFix, type DiagnosticSecondary, type Severity } from "./diagnostics.ts";
 export type { EffectSummary } from "./effects.ts";
 export { elaborate } from "./elaborate.ts";
-export type { Form, FormDefinition, ReportForm } from "./forms.ts";
-export { checkProgram, loadLibrary, type CheckOptions, type CheckResult, type Library } from "./infer.ts";
+export type { Form, FormDefinition, FormRefusal, ReportForm } from "./forms.ts";
+export { checkProgram, loadLibrary, type CheckOptions, type CheckResult, type Library, type LoadLibraryOptions } from "./infer.ts";
 export { builtinInterface, hostSources, loadInterface, type HostInterface, type ValueBinding } from "./interface.ts";
+export {
+  deriveInterface, diffEffectLocks, diffInterfaces, diffProgramUpgrade, formatInterfaceSummary, pinProgramDefinitions,
+  type DerivedInterface, type DerivedTypeExport, type DerivedValueExport, type EffectLockDiff, type InterfaceChangeKind, type InterfaceDiff, type ProgramPin, type UpgradeDiff,
+} from "./modules.ts";
 export { checkSource, readInterface, readLibrary, type SourceCheck } from "./source.ts";

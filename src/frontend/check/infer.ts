@@ -22,27 +22,46 @@ import { analyzeMatch, type Row } from "./exhaustiveness.ts";
 import { formOf, type ReportForm } from "./forms.ts";
 import { binding, type HostInterface, type ValueBinding } from "./interface.ts";
 import {
-  GENERIC, Namer, SOURCE, UnifyError, con, fun, generalize, instantiate, isReply, isRequest, newVar, printScheme, printType, resolve, sameShape,
+  GENERIC, Namer, SOURCE, UnifyError, con, fun, generalize, instantiate, isReply, isRequest, newVar, printScheme, printType, rebuild, resolve, sameShape,
   substitute, tuple, unify, type Clash, type ClassName, type TCon, type TFun, type TLabel, type Type,
 } from "./types.ts";
 
-/** The standard library, checked once against a host, as `open Std` brings it in. */
+/** A checked library (`Std`, application library, or Space library). */
 export interface Library {
   readonly file: string;
+  readonly name?: string;
   readonly program: A.Program;
-  /** Its top-level bindings at the end of the file, in order. */
+  /** Its exported (`pub`, or all when no `pub` is used in a legacy library) top-level bindings, in order. */
   readonly exports: readonly ValueBinding[];
-  /** Its own type declarations. */
+  /** Its exported type declarations. */
   readonly types: readonly TypeInfo[];
-  readonly resolutions: ReadonlyMap<A.Identifier, ValueBinding>;
+  /** Its declared `needs` dependencies. */
+  readonly needs?: readonly string[];
+  /** All declared types (including private ones), for interface derivation and diagnostics. */
+  readonly allTypes?: readonly TypeInfo[];
+  readonly resolutions: ReadonlyMap<A.Identifier | A.QualifiedIdentifier, ValueBinding>;
   readonly diagnostics: readonly CheckDiagnostic[];
+  readonly effects?: readonly EffectSummary[];
   readonly ok: boolean;
+}
+
+export interface LoadLibraryOptions {
+  /** Library module name (e.g. `"Review"`, `"GitHub"`, `"Std"`). */
+  name?: string;
+  /** Libraries available to this library via `open`, `needs`, or qualified `Lib.name`. */
+  libraries?: Readonly<Record<string, Library>>;
+  /** Standard library available to `open Std` inside this library. */
+  std?: Library | null;
+  /** When true, only `pub` declarations are exported even if no `pub` appears in the file. */
+  strictVisibility?: boolean;
 }
 
 export interface CheckOptions {
   host: HostInterface;
   /** What `open Std` brings in; null when the standard library is not available. */
   std: Library | null;
+  /** Named libraries available via `Lib.name`, `open Lib`, `open Lib.{a, b}`, or `needs Lib`. */
+  libraries?: Readonly<Record<string, Library>>;
 }
 
 export interface CheckResult {
@@ -57,16 +76,17 @@ export interface CheckResult {
   reports: { node: A.Call | A.Pipe; form: ReportForm }[];
 }
 
-/** Checks a program against a host interface and, for `open Std`, the standard library. */
+/** Checks a program against a host interface, `Std`, and any named libraries. */
 export function checkProgram(program: A.Program, options: CheckOptions): CheckResult {
-  const checker = new Checker(options.host, options.std);
+  const libs = options.libraries ?? {};
+  const checker = new Checker(options.host, options.std, libs, null);
   checker.run(program);
   const diagnostics = sortDiagnostics(checker.diagnostics);
   const ok = !diagnostics.some((diagnostic) => diagnostic.severity === "error");
   let effects: EffectSummary[] | null = null;
   if (ok) {
     try {
-      effects = effectsSummary(program, checker.resolutions, options.std);
+      effects = effectsSummary(program, checker.resolutions, options.std, libs);
     } catch (error) {
       if (!isStackExhausted(error)) throw error;
       diagnostics.push({ severity: "error", code: "too-deep", message: STACK_EXHAUSTED, span: program.span });
@@ -82,19 +102,27 @@ export function checkProgram(program: A.Program, options: CheckOptions): CheckRe
   };
 }
 
-/** Checks the standard library, so that programs can `open Std`. */
-export function loadLibrary(program: A.Program, file: string, host: HostInterface): Library {
-  const checker = new Checker(host, null);
+/** Checks a library (`Std`, application library, or Space library). */
+export function loadLibrary(program: A.Program, file: string, host: HostInterface, options: LoadLibraryOptions = {}): Library {
+  const name = options.name;
+  const libs = options.libraries ?? {};
+  const checker = new Checker(host, options.std ?? null, libs, name ?? "<library>", options.strictVisibility ?? false);
   checker.run(program);
   const diagnostics = sortDiagnostics(checker.diagnostics);
+  const ok = !diagnostics.some((diagnostic) => diagnostic.severity === "error");
+  const effects = ok ? effectsSummary(program, checker.resolutions, options.std ?? null, libs) : [];
   return {
     file,
+    ...(name ? { name } : {}),
     program,
-    exports: [...checker.topLevel.values()],
-    types: checker.ownTypes,
+    exports: checker.exportedBindings(),
+    types: checker.exportedTypes(),
+    needs: checker.needs,
+    allTypes: checker.ownTypes,
     resolutions: checker.resolutions,
     diagnostics,
-    ok: !diagnostics.some((diagnostic) => diagnostic.severity === "error"),
+    effects,
+    ok,
   };
 }
 
@@ -105,7 +133,12 @@ interface Pending {
   readonly pending: A.LabelledParam;
 }
 
-type Entry = ValueBinding | Pending;
+/** A name imported by two different `open` statements: must be qualified at the use site. */
+interface Ambiguous {
+  readonly ambiguous: { readonly name: string; readonly modules: string[] };
+}
+
+type Entry = ValueBinding | Pending | Ambiguous;
 
 /** Lexical scope: each name maps to a stack of bindings, and a log undoes them when a block ends. */
 class Scope {
@@ -184,15 +217,22 @@ interface Context {
 
 export class Checker {
   readonly diagnostics: CheckDiagnostic[] = [];
-  readonly resolutions = new Map<A.Identifier, ValueBinding>();
+  readonly resolutions = new Map<A.Identifier | A.QualifiedIdentifier, ValueBinding>();
   /** The program's top-level bindings, the latest of each name. */
   readonly topLevel = new Map<string, ValueBinding>();
   ownTypes: TypeInfo[] = [];
+  readonly needs: string[] = [];
 
   private readonly host: HostInterface;
   private readonly std: Library | null;
+  private readonly libraries: Readonly<Record<string, Library>>;
+  private readonly libraryName: string | null;
+  private readonly strictVisibility: boolean;
+  private hasExplicitPub = false;
   private readonly table: TypeTable;
   private readonly scope = new Scope();
+  private readonly openedBy = new Map<string, { module: string; binding: ValueBinding }[]>();
+  private readonly localTopLevel = new Set<string>();
   private level = 0;
   private readonly functions: FunctionContext[] = [];
   private readonly matches: Match[] = [];
@@ -217,10 +257,35 @@ export class Checker {
   /** The names that the lets being read are defining, for the hint to write let rec. */
   private readonly defining: string[] = [];
 
-  constructor(host: HostInterface, std: Library | null) {
+  constructor(
+    host: HostInterface,
+    std: Library | null,
+    libraries: Readonly<Record<string, Library>> = {},
+    libraryName: string | null = null,
+    strictVisibility = false,
+  ) {
     this.host = host;
     this.std = std;
-    this.table = new TypeTable(host.table);
+    this.libraries = libraries;
+    this.libraryName = libraryName;
+    this.strictVisibility = strictVisibility;
+    this.table = new TypeTable(host.table, libraryName);
+  }
+
+  private lookupLibrary(name: string): Library | null {
+    if (name === "Std") return this.std ?? this.libraries["Std"] ?? null;
+    return this.libraries[name] ?? null;
+  }
+
+  exportedBindings(): ValueBinding[] {
+    const all = [...this.topLevel.values()];
+    if (!this.strictVisibility && !this.hasExplicitPub) return all;
+    return all.filter((b) => b.visibility === "pub");
+  }
+
+  exportedTypes(): TypeInfo[] {
+    if (!this.strictVisibility && !this.hasExplicitPub) return this.ownTypes;
+    return this.ownTypes.filter((tInfo) => tInfo.visibility === "pub");
   }
 
   /** Checks a whole program. Running out of stack is reported at the construct being checked, not thrown. */
@@ -235,14 +300,31 @@ export class Checker {
 
   private program(program: A.Program): void {
     this.cursor = program;
-    if (this.std !== null && program.body.some((item) => item.kind === "Open")) {
-      for (const info of this.std.types) this.table.adopt(info);
+    this.hasExplicitPub = program.body.some((item) =>
+      (item.kind === "TypeDecl" || item.kind === "Let" || item.kind === "LetRec") && item.visibility === "pub",
+    );
+    // Adopt types from all supplied libraries by qualified name (`Lib.type`), and unqualified for opened libraries.
+    for (const [modName, lib] of Object.entries(this.libraries)) {
+      const opened = program.body.some((item) => item.kind === "Open" && item.module === modName && !item.names);
+      for (const info of lib.types) this.table.adopt(info, !opened);
+    }
+    if (this.std !== null && program.body.some((item) => item.kind === "Open" && item.module === "Std")) {
+      for (const info of this.std.types) this.table.adopt(info, false);
     }
     const decls = program.body.filter((item): item is A.TypeDecl => item.kind === "TypeDecl");
-    this.ownTypes = declareTypes(this.table, decls, "program", (diagnostic) => this.diagnostics.push(diagnostic), false);
+    const origin = this.libraryName !== null ? "library" : "program";
+    this.ownTypes = declareTypes(
+      this.table,
+      decls,
+      origin,
+      (diagnostic) => this.diagnostics.push(diagnostic),
+      false,
+      this.libraryName ?? undefined,
+    );
     for (const value of this.host.values.values()) this.scope.bind(value.name, value);
     this.statements(program.body, true);
     this.finish();
+    if (this.libraryName !== null) this.checkLibraryInvariants(program);
   }
 
   // Reporting --------------------------------------------------------------------
@@ -282,7 +364,11 @@ export class Checker {
         const holder = resolve(clash.inner);
         let inner = "";
         if (clash.cls === "equality") {
-          if (holder.tag === "con" && holder.name === SOURCE) {
+          const opaqueInfo = holder.tag === "con" ? this.table.lookupType(holder.name) : undefined;
+          if (opaqueInfo && this.table.isSealedOpaque(opaqueInfo)) {
+            code = "opaque-equality";
+            hint = `: ${opaqueInfo.library}.${opaqueInfo.name} is an opaque type from ${opaqueInfo.library} and does not expose == outside its library`;
+          } else if (holder.tag === "con" && holder.name === SOURCE) {
             inner = holder === resolve(clash.type) ? "" : `, which contains ${printType(holder, namer)}`;
             hint = ": events and streams cannot be compared, since they may hold functions, as map and filter do";
           } else if (holder.tag === "con") {
@@ -332,7 +418,7 @@ export class Checker {
   /** The statements of a block or of the program, in order. Their value is the last one's when it is an expression, otherwise (). */
   private statements(items: readonly A.TopLevelItem[], program: boolean): Type {
     let last: A.TopLevelItem | undefined;
-    for (const item of items) if (item.kind !== "TypeDecl" && item.kind !== "External" && item.kind !== "Open") last = item;
+    for (const item of items) if (item.kind !== "TypeDecl" && item.kind !== "External" && item.kind !== "Open" && item.kind !== "Needs") last = item;
     let value: Type = t.unit;
     for (const item of items) {
       this.cursor = item;
@@ -349,6 +435,9 @@ export class Checker {
         case "Open":
           this.open(item);
           break;
+        case "Needs":
+          this.needsDecl(item);
+          break;
         case "Let":
           this.let(item, program);
           value = t.unit;
@@ -358,6 +447,9 @@ export class Checker {
           value = t.unit;
           break;
         default: {
+          if (program && this.libraryName !== null) {
+            this.error("library-item", `a library may hold only type, let, let rec, open and needs declarations at the top level`, item.span);
+          }
           const type = this.infer(item);
           if (item === last) {
             value = type;
@@ -370,18 +462,102 @@ export class Checker {
     return value;
   }
 
-  private open(node: A.Open): void {
-    if (this.std === null) {
-      this.error("no-std", "open Std needs the standard library, and this check was not given one", node.span);
+  private needsDecl(node: A.Needs): void {
+    if (!this.needs.includes(node.module)) this.needs.push(node.module);
+    const lib = this.lookupLibrary(node.module);
+    if (lib === null) {
+      this.error(
+        "missing-needs",
+        `this ${this.libraryName ? `library (${this.libraryName})` : "program"} needs module ${node.module}, which was not supplied`,
+        node.span,
+        { candidates: Object.keys(this.libraries) },
+      );
       return;
     }
-    if (!this.std.ok && !this.stdReported) {
-      this.stdReported = true;
-      const first = this.std.diagnostics.find((diagnostic) => diagnostic.severity === "error")!;
-      const { line, column } = first.span.start;
-      this.error("std-error", `the standard library does not type-check with this host: ${first.message} at ${this.std.file}:${line}:${column}`, node.span);
+    for (const info of lib.types) this.table.adopt(info, true);
+  }
+
+  private open(node: A.Open): void {
+    const lib = this.lookupLibrary(node.module);
+    if (lib === null) {
+      if (node.module === "Std") {
+        this.error("no-std", "open Std needs the standard library, and this check was not given one", node.span);
+      } else {
+        const candidates = [...(this.std ? ["Std"] : []), ...Object.keys(this.libraries)];
+        const near = closest(node.module, candidates);
+        this.error(
+          "unknown-module",
+          `unknown module ${node.module}${near ? `; did you mean ${near}?` : ""}`,
+          node.span,
+          { candidates },
+        );
+      }
+      return;
     }
-    for (const value of this.std.exports) this.scope.bind(value.name, value);
+    if (!lib.ok && (node.module !== "Std" || !this.stdReported)) {
+      if (node.module === "Std") this.stdReported = true;
+      const first = lib.diagnostics.find((diagnostic) => diagnostic.severity === "error");
+      if (first) {
+        const { line, column } = first.span.start;
+        this.error(
+          "std-error",
+          `${node.module === "Std" ? "the standard library" : `library ${node.module}`} does not type-check with this host: ${first.message} at ${lib.file}:${line}:${column}`,
+          node.span,
+        );
+      }
+    }
+    const toImport: ValueBinding[] = [];
+    if (node.names) {
+      const exportNames = lib.exports.map((b) => b.name);
+      for (const wanted of node.names) {
+        const found = lib.exports.find((b) => b.name === wanted);
+        if (!found) {
+          const near = closest(wanted, exportNames);
+          this.error(
+            "unknown-export",
+            `${node.module} does not export ${wanted}${near ? `; did you mean ${near}?` : ""}`,
+            node.span,
+            { candidates: exportNames },
+          );
+          continue;
+        }
+        toImport.push(found);
+      }
+    } else {
+      toImport.push(...lib.exports);
+    }
+    for (const value of toImport) {
+      // Never shadow a local top-level binding with an `open` (unless legacy repeated `open Std`).
+      if (this.localTopLevel.has(value.name)) {
+        if (node.module !== "Std" || node.names) {
+          this.error("shadowed-open", `open ${node.module} cannot shadow local binding ${value.name}; qualify it as ${node.module}.${value.name}`, node.span);
+          continue;
+        }
+      }
+      const existing = this.openedBy.get(value.name);
+      if (existing && !existing.some((entry) => entry.module === node.module && entry.binding === value)) {
+        existing.push({ module: node.module, binding: value });
+        this.scope.bind(value.name, { ambiguous: { name: value.name, modules: existing.map((e) => e.module) } });
+      } else {
+        if (!existing) this.openedBy.set(value.name, [{ module: node.module, binding: value }]);
+        this.scope.bind(value.name, value);
+      }
+    }
+  }
+
+  private readAnnotation(expr: A.TypeExpression, vars: Map<string, Type> = new Map()): Type {
+    const reader = new TypeReader(this.table, (diagnostic) => this.diagnostics.push(diagnostic));
+    const raw = reader.read(expr, {
+      lookup: (variable) => {
+        let found = vars.get(variable.name);
+        if (found === undefined) {
+          found = newVar(this.level);
+          vars.set(variable.name, found);
+        }
+        return found;
+      },
+    });
+    return rebuild(raw, (leaf) => (leaf.tag === "param" ? newVar(this.level) : leaf));
   }
 
   private let(node: A.Let, topLevel: boolean): void {
@@ -389,7 +565,22 @@ export class Checker {
     this.level += 1;
     const defining = node.pattern.kind === "VarPattern" && node.value.kind === "Lambda" ? node.pattern.name : null;
     if (defining !== null) this.defining.push(defining);
-    const type = this.infer(node.value);
+    const annotated = node.annotation ? this.readAnnotation(node.annotation) : null;
+    let type: Type;
+    if (annotated !== null) {
+      const shape = resolve(annotated);
+      if (node.value.kind === "Lambda" && shape.tag === "fun") {
+        type = this.lambda(node.value, shape);
+      } else if (node.value.kind === "RecordLiteral") {
+        type = this.record(node.value, annotated);
+      } else {
+        type = this.infer(node.value);
+      }
+      this.expect(type, annotated, valueSpan(node.value), { where: "for this annotated let binding" });
+      type = annotated;
+    } else {
+      type = this.infer(node.value);
+    }
     if (defining !== null) this.defining.pop();
     const binder: Binder = { names: new Map(), parameter: null, within: "pattern" };
     const before = this.patternErrors;
@@ -399,8 +590,14 @@ export class Checker {
     for (const value of bindings) {
       generalize(value.type, this.level);
       if (node.pattern.kind === "VarPattern") value.lambda = this.functionOf(node.value);
-      this.scope.bind(value.name, value);
-      if (topLevel) this.topLevel.set(value.name, value);
+      const boundValue: ValueBinding = this.libraryName !== null && topLevel
+        ? { ...value, library: this.libraryName, visibility: node.visibility === "pub" ? "pub" : "private" }
+        : value;
+      this.scope.bind(boundValue.name, boundValue);
+      if (topLevel) {
+        this.localTopLevel.add(boundValue.name);
+        this.topLevel.set(boundValue.name, boundValue);
+      }
     }
     this.markDropped(drops);
     this.lets.push({ pattern: node.pattern, bindings });
@@ -417,7 +614,15 @@ export class Checker {
         continue;
       }
       // Each function's shape is known from its parameters, so a recursive call may leave out a label with a default.
-      const value = binding({ name: rec.name, type: this.shapeOf(rec.value), origin: "program", lambda: rec.value, node: rec });
+      const shapeType = rec.annotation ? this.readAnnotation(rec.annotation) : this.shapeOf(rec.value);
+      const value = binding({
+        name: rec.name,
+        type: shapeType,
+        origin: this.libraryName !== null && topLevel ? "library" : "program",
+        ...(this.libraryName !== null && topLevel ? { library: this.libraryName, visibility: node.visibility === "pub" ? "pub" : "private" } : {}),
+        lambda: rec.value,
+        node: rec,
+      });
       bindings.push(value);
       this.scope.bind(rec.name, value);
     }
@@ -432,9 +637,81 @@ export class Checker {
     this.level -= 1;
     for (const value of bindings) {
       generalize(value.type, this.level);
-      if (topLevel) this.topLevel.set(value.name, value);
+      if (topLevel) {
+        this.localTopLevel.add(value.name);
+        this.topLevel.set(value.name, value);
+      }
     }
     this.markDropped(drops);
+  }
+
+  /** Library-only invariants: pure top-level initializers and private-in-public check. */
+  private checkLibraryInvariants(program: A.Program): void {
+    // 1. Top-level purity: non-lambda initializers in a library cannot perform effects.
+    for (const item of program.body) {
+      if (item.kind !== "Let" || item.value.kind === "Lambda") continue;
+      const synthetic: A.Program = { kind: "Program", body: [item.value], span: item.span };
+      const initEffects = effectsSummary(synthetic, this.resolutions, this.std, this.libraries);
+      if (initEffects.length > 0) {
+        this.error(
+          "library-effect",
+          `library top-level binding performs effects (${initEffects.map((e) => e.family).join(", ")}); wrap effectful work in a function`,
+          item.span,
+        );
+      }
+    }
+    // 2. Private-in-public: exported `pub` bindings and non-opaque `pub` types may not reference private types of this library.
+    if (!this.hasExplicitPub && !this.strictVisibility) return;
+    const privateTypes = new Set(this.ownTypes.filter((info) => info.visibility !== "pub"));
+    if (privateTypes.size === 0) return;
+    const findPrivate = (root: Type): TypeInfo | null => {
+      const seen = new Set<Type>();
+      const stack: Type[] = [root];
+      while (stack.length > 0) {
+        const cur = resolve(stack.pop()!);
+        if (seen.has(cur)) continue;
+        seen.add(cur);
+        if (cur.tag === "con") {
+          const info = this.table.lookupType(cur.name);
+          if (info && privateTypes.has(info)) return info;
+          stack.push(...cur.args);
+        } else if (cur.tag === "tuple") {
+          stack.push(...cur.elements);
+        } else if (cur.tag === "fun") {
+          stack.push(...cur.params, ...cur.labels.map((l) => l.type), cur.result);
+        }
+      }
+      return null;
+    };
+    for (const value of this.exportedBindings()) {
+      const leaked = findPrivate(value.type);
+      if (leaked) {
+        this.error(
+          "private-in-public",
+          `pub binding ${value.name} exposes private type ${leaked.name} in its signature; mark ${leaked.name} as pub or pub opaque`,
+          value.node?.span ?? program.span,
+        );
+      }
+    }
+    for (const info of this.exportedTypes()) {
+      if (info.opaque) continue;
+      const parts = [
+        ...info.fields.map((f) => f.type),
+        ...info.constructors.flatMap((c) => c.args),
+        ...(info.alias ? [info.alias] : []),
+      ];
+      for (const part of parts) {
+        const leaked = findPrivate(part);
+        if (leaked) {
+          this.error(
+            "private-in-public",
+            `pub type ${info.name} exposes private type ${leaked.name}; mark ${leaked.name} as pub or pub opaque`,
+            info.decl?.span ?? program.span,
+          );
+          break;
+        }
+      }
+    }
   }
 
   /** The type a function literal has before its body is read: its parameters' shape, with fresh types. */
@@ -532,6 +809,8 @@ export class Checker {
         if (binding?.origin === "builtin" && node.name === "run") unify(this.reportOf(type), con("report"), this.table);
         return type;
       }
+      case "QualifiedIdentifier":
+        return this.qualifiedIdentifier(node);
       case "Constructor":
         return this.constructor_(node);
       case "TupleLiteral":
@@ -580,11 +859,16 @@ export class Checker {
     }
   }
 
-  /** Checks an expression against the type its context needs. A function literal is checked against it from the start, so that its parameters' types are known inside it. */
+  /** Checks an expression against the type its context needs. A function literal or record literal is checked against it from the start. */
   private argument(node: A.Expression, expected: Type, context: Context): void {
     const shape = resolve(expected);
     if (node.kind === "Lambda" && shape.tag === "fun") {
       const type = this.lambda(node, shape);
+      this.expect(type, expected, node.span, context);
+      return;
+    }
+    if (node.kind === "RecordLiteral") {
+      const type = this.record(node, expected);
       this.expect(type, expected, node.span, context);
       return;
     }
@@ -598,6 +882,16 @@ export class Checker {
       this.error("unknown-name", `unknown name ${node.name}${this.nameHint(node.name)}`, node.span);
       return newVar(this.level);
     }
+    if ("ambiguous" in entry) {
+      const qualified = entry.ambiguous.modules.map((m) => `${m}.${entry.ambiguous.name}`);
+      this.error(
+        "ambiguous-open",
+        `${entry.ambiguous.name} is exported by ${both(entry.ambiguous.modules)}; qualify it as ${either(qualified)}`,
+        node.span,
+        { candidates: qualified },
+      );
+      return newVar(this.level);
+    }
     if ("pending" in entry) {
       this.error(
         "later-parameter",
@@ -609,6 +903,35 @@ export class Checker {
     entry.used = true;
     this.resolutions.set(node, entry);
     return instantiate(entry.type, this.level);
+  }
+
+  private qualifiedIdentifier(node: A.QualifiedIdentifier): Type {
+    const lib = this.lookupLibrary(node.module);
+    if (lib === null) {
+      const candidates = [...(this.std ? ["Std"] : []), ...Object.keys(this.libraries)];
+      const near = closest(node.module, candidates);
+      this.error(
+        "unknown-module",
+        `unknown module ${node.module}${near ? `; did you mean ${near}?` : ""}`,
+        node.span,
+        { candidates },
+      );
+      return newVar(this.level);
+    }
+    const found = lib.exports.find((b) => b.name === node.name);
+    if (!found) {
+      const exportNames = lib.exports.map((b) => b.name);
+      const near = closest(node.name, exportNames);
+      this.error(
+        "unknown-export",
+        `${node.module} does not export ${node.name}${near ? `; did you mean ${near}?` : ""}`,
+        node.span,
+        { candidates: exportNames },
+      );
+      return newVar(this.level);
+    }
+    this.resolutions.set(node, found);
+    return instantiate(found.type, this.level);
   }
 
   /**
@@ -660,6 +983,10 @@ export class Checker {
     if (node.kind === "Identifier") {
       const type = this.identifier(node);
       return { type, name: node.name, binding: this.resolutions.get(node) };
+    }
+    if (node.kind === "QualifiedIdentifier") {
+      const type = this.qualifiedIdentifier(node);
+      return { type, name: `${node.module}.${node.name}`, binding: this.resolutions.get(node) };
     }
     return { type: this.infer(node), name: null };
   }
@@ -734,6 +1061,16 @@ export class Checker {
         continue;
       }
       this.argument(arg.value, param.type, { where: `for ~${arg.label} of ${name ?? "this function"}` });
+      if (arg.label === "about" && callee.binding?.origin === "builtin" && name !== null && ["ask", "confirm", "choose", "run", "judge"].includes(name)) {
+        const leakedOpaque = this.findSealedOpaque(param.type);
+        if (leakedOpaque) {
+          this.error(
+            "opaque-about",
+            `cannot pass opaque type ${leakedOpaque.library}.${leakedOpaque.name} directly to ~about outside ${leakedOpaque.library}; ask ${leakedOpaque.library} for a public view or identifier`,
+            arg.value.span,
+          );
+        }
+      }
     }
     // A required label that an unknown one nearly spells is reported with the unknown one.
     const misspelt = new Set(unknown.map((label) => closest(label, shape.labels.map((l) => l.label))));
@@ -809,8 +1146,29 @@ export class Checker {
     return t.list(element);
   }
 
-  /** A record literal has the type of the latest declared record type with exactly its fields, or of the record it spreads. */
-  private record(node: A.RecordLiteral): Type {
+  /** Finds any sealed opaque type inside `type`, for `~about` anti-leakage checking. */
+  private findSealedOpaque(type: Type): TypeInfo | null {
+    const seen = new Set<Type>();
+    const stack: Type[] = [type];
+    while (stack.length > 0) {
+      const cur = resolve(stack.pop()!);
+      if (seen.has(cur)) continue;
+      seen.add(cur);
+      if (cur.tag === "con") {
+        const info = this.table.lookupType(cur.name);
+        if (info && this.table.isSealedOpaque(info)) return info;
+        stack.push(...cur.args);
+      } else if (cur.tag === "tuple") {
+        stack.push(...cur.elements);
+      } else if (cur.tag === "fun") {
+        stack.push(...cur.params, ...cur.labels.map((l) => l.type), cur.result);
+      }
+    }
+    return null;
+  }
+
+  /** A record literal has the type of the expected record (when inside its defining library or matching), or the latest declared record type with its fields. */
+  private record(node: A.RecordLiteral, expected: Type | null = null): Type {
     const names: string[] = [];
     const fields: A.RecordField[] = [];
     for (const field of node.fields) {
@@ -828,15 +1186,16 @@ export class Checker {
     if (node.spread !== null) {
       type = this.infer(node.spread);
       const shape = resolve(type);
-      const known = shape.tag === "con" ? this.table.types.get(shape.name) : undefined;
-      if (known?.kind === "record") {
+      const known = shape.tag === "con" ? this.table.lookupType(shape.name) : undefined;
+      if (known?.kind === "record" && !this.table.isSealedOpaque(known)) {
         info = known;
         args = [...(shape as { args: readonly Type[] }).args];
       } else if (shape.tag === "var") {
         info = this.table.recordWith(names);
         if (info !== null) {
           args = info.params.map(() => newVar(this.level));
-          this.expect(type, con(info.name, ...args), node.spread.span, { where: "for the record before the fields" });
+          const canonical = info.opaque && info.library ? `${info.library}.${info.name}` : info.name;
+          this.expect(type, con(canonical, ...args), node.spread.span, { where: "for the record before the fields" });
         } else {
           this.unknownFields(names, fields, node);
         }
@@ -845,7 +1204,18 @@ export class Checker {
         this.error("type-mismatch", `expected a record after ..., found ${found}`, node.spread.span, { expected: "a record", found });
       }
     } else {
-      info = this.table.recordExactly(names);
+      const expShape = expected !== null ? resolve(expected) : null;
+      const expInfo = expShape?.tag === "con" ? this.table.lookupType(expShape.name) : undefined;
+      if (
+        expInfo?.kind === "record" &&
+        !this.table.isSealedOpaque(expInfo) &&
+        expInfo.fields.length === names.length &&
+        names.every((n) => expInfo.fields.some((f) => f.name === n))
+      ) {
+        info = expInfo;
+      } else {
+        info = this.table.recordExactly(names);
+      }
       if (info === null) {
         const candidate = this.table.recordWith(names);
         if (candidate === null) {
@@ -864,7 +1234,8 @@ export class Checker {
         }
       }
       args = info === null ? [] : info.params.map(() => newVar(this.level));
-      type = info === null ? newVar(this.level) : con(info.name, ...args);
+      const canonical = info === null ? null : (info.opaque && info.library ? `${info.library}.${info.name}` : info.name);
+      type = canonical === null ? newVar(this.level) : con(canonical, ...args);
     }
     for (const field of fields) {
       const declared = info?.fields.find((candidate) => candidate.name === field.name);
@@ -892,22 +1263,25 @@ export class Checker {
   private field(node: A.FieldAccess, recordType: Type): Type {
     const span = fieldSpan(node);
     const shape = resolve(recordType);
-    let info = shape.tag === "con" ? this.table.types.get(shape.name) ?? null : null;
+    let info = shape.tag === "con" ? this.table.lookupType(shape.name) ?? null : null;
     let args: readonly Type[] = shape.tag === "con" ? shape.args : [];
     if (shape.tag === "var") {
       info = this.table.recordWith([node.field]);
       if (info === null) {
-        const near = closest(node.field, this.table.records.flatMap((record) => record.fields.map((field) => field.name)));
+        const near = closest(node.field, this.table.records.filter((r) => !this.table.isSealedOpaque(r)).flatMap((record) => record.fields.map((field) => field.name)));
         this.error("unknown-field", `unknown field ${node.field}: no record type has it${near === null ? "" : `; did you mean ${near}?`}`, span);
         return newVar(this.level);
       }
       args = info.params.map(() => newVar(this.level));
-      this.expect(recordType, con(info.name, ...args), node.record.span, { where: `for the record whose field ${node.field} is read` });
-    } else if (info?.kind !== "record") {
+      const canonical = info.opaque && info.library ? `${info.library}.${info.name}` : info.name;
+      this.expect(recordType, con(canonical, ...args), node.record.span, { where: `for the record whose field ${node.field} is read` });
+    } else if (info?.kind !== "record" || this.table.isSealedOpaque(info)) {
       const found = printType(shape);
-      const hint = shape.tag === "con" && (shape.name === "reply" || shape.name === "option" || shape.name === "result")
-        ? "; take the value out first, with ? or switch"
-        : isRequest(shape) ? "; wait for the request first, with ->wait" : "";
+      const hint = info && this.table.isSealedOpaque(info)
+        ? `; ${info.library}.${info.name} is an opaque type from ${info.library}`
+        : shape.tag === "con" && (shape.name === "reply" || shape.name === "option" || shape.name === "result")
+          ? "; take the value out first, with ? or switch"
+          : isRequest(shape) ? "; wait for the request first, with ->wait" : "";
       this.error("type-mismatch", `expected a record with the field ${node.field}, found ${found}${hint}`, node.record.span, { expected: `a record with the field ${node.field}`, found });
       return newVar(this.level);
     }
@@ -1035,18 +1409,29 @@ export class Checker {
    */
   private lambda(node: A.Lambda, expected: TFun | null): TFun {
     this.cursor = node;
-    const positional = node.params.filter((param): param is A.Pattern => param.kind !== "LabelledParam");
+    const positional = node.params.filter((param): param is A.Pattern | A.AnnotatedParam => param.kind !== "LabelledParam");
     const labelled = node.params.filter((param): param is A.LabelledParam => param.kind === "LabelledParam");
     const fits = expected !== null && expected.params.length === positional.length && expected.labels.length === labelled.length &&
       labelled.every((param) => expected.labels.some((label) => label.label === param.label && label.optional === (param.defaultValue !== null)));
-    const context: FunctionContext = { returnType: fits ? expected.result : newVar(this.level), firstTry: null };
+    const annotationVars = new Map<string, Type>();
+    const annotatedReturn = node.returnType ? this.readAnnotation(node.returnType, annotationVars) : null;
+    const initialReturn = annotatedReturn ?? (fits ? expected.result : newVar(this.level));
+    if (annotatedReturn && fits) {
+      this.expect(annotatedReturn, expected.result, node.returnType!.span, { where: "for the return type of this function" });
+    }
+    const context: FunctionContext = { returnType: initialReturn, firstTry: null };
     const mark = this.scope.mark();
     const names = new Map<string, ValueBinding>();
     const bound: ValueBinding[] = [];
     // Positional parameters are bound first: they are bound before any default is read.
-    const params = positional.map((pattern, index) => {
-      const type = fits ? expected.params[index]! : newVar(this.level);
-      bound.push(...this.parameter(pattern, type, names, { lambda: node, index }));
+    const params = positional.map((param, index) => {
+      const pat = param.kind === "AnnotatedParam" ? param.pattern : param;
+      const annotated = param.kind === "AnnotatedParam" ? this.readAnnotation(param.type, annotationVars) : null;
+      const type = annotated ?? (fits ? expected.params[index]! : newVar(this.level));
+      if (annotated && fits) {
+        this.expect(annotated, expected.params[index]!, param.span, { where: `for the ${ordinal(index)} parameter` });
+      }
+      bound.push(...this.parameter(pat, type, names, { lambda: node, index }));
       return type;
     });
     for (const value of bound) this.scope.bind(value.name, value);
@@ -1057,7 +1442,11 @@ export class Checker {
         if (param.defaultValue !== null) this.infer(param.defaultValue);
         return;
       }
-      const type = fits ? expected.labels.find((label) => label.label === param.label)!.type : newVar(this.level);
+      const annotated = param.annotation ? this.readAnnotation(param.annotation, annotationVars) : null;
+      const type = annotated ?? (fits ? expected.labels.find((label) => label.label === param.label)!.type : newVar(this.level));
+      if (annotated && fits) {
+        this.expect(annotated, expected.labels.find((label) => label.label === param.label)!.type, param.annotation!.span, { where: `for ~${param.label}` });
+      }
       if (param.defaultValue !== null) {
         // The default is read when a call leaves the label out, inside the function: the labelled parameters after it are not bound yet.
         const pending = this.scope.mark();
@@ -1071,7 +1460,9 @@ export class Checker {
       labels.push({ label: param.label, type, optional: param.defaultValue !== null });
     });
     this.functions.push(context);
-    const body = this.infer(node.body);
+    const body = node.body.kind === "RecordLiteral"
+      ? this.record(node.body, context.returnType)
+      : this.infer(node.body);
     this.functions.pop();
     this.expect(body, context.returnType, valueSpan(node.body), {
       where: "as the result of this function",
@@ -1355,6 +1746,16 @@ export class Checker {
     for (const { node, report } of this.runs) {
       if (resolve(report).tag === "var") unify(report, con("report"), this.table);
       const form = formOf(report, this.table);
+      if (typeof form === "object" && "opaque" in form) {
+        const found = printType(resolve(report));
+        this.error(
+          "opaque-form",
+          `this run cannot report opaque type ${form.library}.${form.name}: only ${form.library} can construct ${form.name}`,
+          node.span,
+          { found },
+        );
+        continue;
+      }
       if (typeof form !== "string") { this.reports.push({ node, form }); continue; }
       const found = printType(resolve(report));
       this.error(
@@ -1489,8 +1890,8 @@ function spineChild(node: A.Expression): A.Expression | null {
     case "Pipe":
       return node.left;
     case "Call":
-      // A call of a name is a chain's base.
-      return node.callee.kind === "Identifier" ? null : node.callee;
+      // A call of a name or qualified module name is a chain's base.
+      return node.callee.kind === "Identifier" || node.callee.kind === "QualifiedIdentifier" ? null : node.callee;
     case "FieldAccess":
       return node.record;
     case "Try":

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { test } from "node:test";
-import { NODE_FIELDS, astFromJson, astToJson, astVersion, type AstNode, type Pos } from "../../src/frontend/index.ts";
+import { NODE_FIELDS, OPTIONAL_V3_FIELDS, astFromJson, astToJson, astVersion, type AstNode, type Pos } from "../../src/frontend/index.ts";
 import { assertNoSharedObjects, parseOk, preorderKinds, prettyAstJson } from "./helpers.ts";
 
 const root = new URL("../../", import.meta.url);
@@ -89,7 +89,9 @@ function checkPositions(program: AstNode, source: string, path: string): void {
   };
   const visit = (node: AstNode, parent: AstNode | null) => {
     const label = `${path}: ${node.kind} at offset ${node.span.start.offset}`;
-    assert.deepEqual(Object.keys(node).sort(), ["kind", ...NODE_FIELDS[node.kind], "span"].sort(), label);
+    const optional = OPTIONAL_V3_FIELDS[node.kind] ?? [];
+    const expectedFields = NODE_FIELDS[node.kind].filter((field) => !optional.includes(field) || Object.hasOwn(node, field));
+    assert.deepEqual(Object.keys(node).sort(), ["kind", ...expectedFields, "span"].sort(), label);
     assert.deepEqual(node.span.start, expected(node.span.start.offset), label);
     assert.deepEqual(node.span.end, expected(node.span.end.offset), label);
     assert.ok(node.span.start.offset <= node.span.end.offset, label);
