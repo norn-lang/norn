@@ -24,6 +24,8 @@ export interface DerivedTypeExport {
   params: string[];
   kind: string;
   opaque: boolean;
+  fields?: { name: string; type: string }[];
+  constructors?: { name: string; args: string[] }[];
   doc?: string;
 }
 
@@ -45,6 +47,12 @@ export function deriveInterface(lib: Library): DerivedInterface {
     params: [...info.params],
     kind: info.opaque ? "opaque" : info.kind,
     opaque: Boolean(info.opaque),
+    ...(!info.opaque && info.kind === "record"
+      ? { fields: info.fields.map((f) => ({ name: f.name, type: printType(f.type) })) }
+      : {}),
+    ...(!info.opaque && info.kind === "variant"
+      ? { constructors: info.constructors.map((c) => ({ name: c.name, args: c.args.map((a) => printType(a)) })) }
+      : {}),
     ...(info.doc ? { doc: info.doc } : {}),
   }));
   const values: DerivedValueExport[] = lib.exports.map((binding) => {
@@ -107,7 +115,9 @@ export function diffInterfaces(before: DerivedInterface, after: DerivedInterface
   for (const [name, afterType] of afterTypes) {
     const prev = beforeTypes.get(name);
     if (!prev) continue;
-    if (prev.kind !== afterType.kind || prev.opaque !== afterType.opaque || prev.params.join(",") !== afterType.params.join(",")) {
+    const fieldsChanged = JSON.stringify(prev.fields ?? []) !== JSON.stringify(afterType.fields ?? []);
+    const ctorsChanged = JSON.stringify(prev.constructors ?? []) !== JSON.stringify(afterType.constructors ?? []);
+    if (prev.kind !== afterType.kind || prev.opaque !== afterType.opaque || prev.params.join(",") !== afterType.params.join(",") || fieldsChanged || ctorsChanged) {
       changedTypes.push({ name, before: prev, after: afterType });
     }
   }

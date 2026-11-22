@@ -13,6 +13,8 @@ export interface Effect {
   eachStrategy?: "Queue" | "Latest" | "Restart" | "Together" | "Batch";
   /** Optional partition key extractor on `forEach` (`~per`). */
   perKey?: Value | null;
+  /** Callback closure on `forEach` (used by `~each=Together` concurrent rounds). */
+  callback?: Value;
 }
 type Control =
   | { kind: "eval"; node: string; env: string }
@@ -326,7 +328,7 @@ function builtin(code: Code, machine: Machine, name: string, args: Value[], labe
       const loopKey = key ? key.value : null;
       const perKey = per ?? null;
       machine.frames.push({ kind: "forEach", stream: args[0], callback: args[1], loopKey, eachStrategy, perKey, stage: "waiting" });
-      machine.control = { kind: "effect", effect: { name: "wait", args: [args[0]], labels: {}, loop: "begins", loopKey, eachStrategy, perKey } }; return;
+      machine.control = { kind: "effect", effect: { name: "wait", args: [args[0]], labels: {}, loop: "begins", loopKey, eachStrategy, perKey, callback: args[1] } }; return;
     }
     default: {
       const modResult = evalBuiltinModule(code, machine, name, args, labels);
@@ -696,7 +698,7 @@ function accept(code: Code, machine: Machine, value: Value): void {
         machine.frames.push({ ...frame, stage: "waiting" });
         machine.control = {
           kind: "effect",
-          effect: { name: "wait", args: [frame.stream], labels: {}, loop: "continues", loopKey: frame.loopKey, eachStrategy: frame.eachStrategy, perKey: frame.perKey },
+          effect: { name: "wait", args: [frame.stream], labels: {}, loop: "continues", loopKey: frame.loopKey, eachStrategy: frame.eachStrategy, perKey: frame.perKey, callback: frame.callback },
         };
       }
       break;
