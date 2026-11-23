@@ -6,7 +6,8 @@
 import { fieldFor, fieldForForm, sourceValue, valueOf, type Field, type Host, type HostExternal } from "./host.ts";
 import { el } from "./panels.ts";
 import { fieldInput, type FieldInput } from "./forms.ts";
-import type { Value } from "../../src/runtime/browser.ts";
+import { compile, emptyLedger, evaluate, preparedAction, type Value } from "../../src/runtime/browser.ts";
+import { parse } from "../../src/frontend/parser.ts";
 import type { AwaitedEvent, OpenRequest, Simulation, SimulationState } from "./simulation.ts";
 import { sentence, tell } from "./story.ts";
 import { formatDate, formatTime, formatTimeOfDay, formatWeekday, source as sourceText, type Run } from "./words.ts";
@@ -141,6 +142,8 @@ export function createRunPanel(elements: RunElements, host: Host): RunPanel {
 
     const who: Run[] =
       request.name === "judge" ? ["The judge decides this. Decide as the judge."]
+      : request.name === "prepare" ? ["The host is asked to admit this", ...(request.action?.input ? [": ", { kind: "code" as const, text: request.action.input }] : []), ". Nothing is done yet. Decide as the host."]
+      : request.name === "perform" ? ["The host does what was prepared, once. Give its result as the host."]
       : request.delegatedBy !== null ? [{ kind: "participant", text: request.holder }, " answers this for ", { kind: "participant", text: request.delegatedBy }, ", who delegated it. Answer as them."]
       : request.name === "run" ? [{ kind: "participant", text: request.holder }, " has this task. Finish it as them."]
       : [{ kind: "participant", text: request.holder }, " is asked. Answer as them."];
@@ -150,7 +153,22 @@ export function createRunPanel(elements: RunElements, host: Host): RunPanel {
       el("p", { class: "card-who" }, ...runs(who), ...runs(due), ...(request.awaited ? [] : [" Nothing waits for it yet: the reply is kept until the program looks."])),
     );
 
-    if (request.name === "judge") {
+    if (request.name === "prepare") {
+      const button = el("button", { type: "button", class: "choice" }, "Admit");
+      button.addEventListener("click", () => busy(() => simulation!.answer(request.id, preparedAction(request))));
+      actions.append(button);
+    } else if (request.name === "perform") {
+      // The host answers with what the action gives back: a Norn value, such as {id: "1", url: "https://example.com"}.
+      const input = el("input", { type: "text", "aria-label": "Result", placeholder: "Result, as {url: \"https://…\"}", autocomplete: "off" });
+      const form = el("form", { class: "card-answer" }, input, el("button", { type: "submit", class: "choice" }, "Done"));
+      form.addEventListener("submit", (event) => {
+        event.preventDefault();
+        const read = normValue(input.value);
+        if (read === null) return problem(form, "Write the result as a Norn value, such as {url: \"https://example.com\"}");
+        busy(() => simulation!.answer(request.id, read));
+      });
+      actions.append(form);
+    } else if (request.name === "judge") {
       for (const verdict of [true, false]) {
         const button = el("button", { type: "button", class: "choice" }, String(verdict));
         button.addEventListener("click", () => busy(() => simulation!.answer(request.id, { type: "bool", value: verdict })));
@@ -186,7 +204,7 @@ export function createRunPanel(elements: RunElements, host: Host): RunPanel {
       button.addEventListener("click", () => openReason(verb));
       refusals.append(button);
     }
-    if (!delegated && request.name !== "judge") {
+    if (!delegated && request.name !== "judge" && request.action === null) {
       const button = el("button", { type: "button", class: "quiet-button" }, "Delegate…");
       button.addEventListener("click", () => openDelegate());
       refusals.append(button);
@@ -352,6 +370,18 @@ function deadlineLabel(now: number, at: number): string {
 function defaultValue(source: Source): string {
   const first = [...source.args, ...Object.values(source.labels)].find((arg) => arg.type === "string");
   return first?.type === "string" ? first.value : "";
+}
+
+/** What was typed, as the Norn value it writes: a program that computes nothing and asks nobody. Null when it is not one. */
+function normValue(typed: string): Value | null {
+  const parsed = parse(typed);
+  if (!parsed.ok) return null;
+  try {
+    const pass = evaluate(compile(parsed.program), emptyLedger(0), 0, { steps: 100_000 });
+    return pass.status === "completed" && pass.log.length === 0 ? pass.result : null;
+  } catch {
+    return null;
+  }
 }
 
 function problem(form: HTMLElement, message: string): void {

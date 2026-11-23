@@ -18,7 +18,7 @@ import { REMOVED_CONSTRUCTORS, REMOVED_NAMES, removedLabel } from "./removed.ts"
 import { TypeReader, TypeTable, declareTypes, externalType, type CtorInfo, type TypeInfo } from "./declarations.ts";
 import { both, closest, count, either, ordinal, sortDiagnostics, type CheckDiagnostic, type Code } from "./diagnostics.ts";
 import { effectsSummary, type EffectSummary } from "./effects.ts";
-import { validateEventKindAgainstManifests, type ConnectorManifest } from "./events.ts";
+import { validateActionAgainstManifests, validateEventKindAgainstManifests, type ConnectorManifest } from "./events.ts";
 import { analyzeMatch, type Row } from "./exhaustiveness.ts";
 import type { FormEvidencePlan } from "./elaborate.ts";
 import { formOf, type ReportForm } from "./forms.ts";
@@ -56,6 +56,8 @@ export interface LoadLibraryOptions {
   std?: Library | null;
   /** When true, only `pub` declarations are exported even if no `pub` appears in the file. */
   strictVisibility?: boolean;
+  /** Connector manifests the library's `Events.kind` and `Actions.action` calls are checked against. */
+  manifests?: readonly ConnectorManifest[];
 }
 
 export interface CheckOptions {
@@ -64,7 +66,7 @@ export interface CheckOptions {
   std: Library | null;
   /** Named libraries available via `Lib.name`, `open Lib`, `open Lib.{a, b}`, or `needs Lib`. */
   libraries?: Readonly<Record<string, Library>>;
-  /** Optional connector manifests used to statically validate `Events.kind(app, kind)` and payload fields. */
+  /** Optional connector manifests used to statically validate `Events.kind(app, kind)`, `Actions.action(app, name)` and their fields. */
   manifests?: readonly ConnectorManifest[];
   /** When true, emit a `default-report-form` warning when an unconstrained `run` falls back to host `report`. */
   warnDefaultReport?: boolean;
@@ -118,7 +120,7 @@ export function checkProgram(program: A.Program, options: CheckOptions): CheckRe
 export function loadLibrary(program: A.Program, file: string, host: HostInterface, options: LoadLibraryOptions = {}): Library {
   const name = options.name;
   const libs = options.libraries ?? {};
-  const checker = new Checker(host, options.std ?? null, libs, name ?? "<library>", options.strictVisibility ?? false);
+  const checker = new Checker(host, options.std ?? null, libs, name ?? "<library>", options.strictVisibility ?? false, options.manifests ?? []);
   checker.run(program);
   const diagnostics = sortDiagnostics(checker.diagnostics);
   const ok = !diagnostics.some((diagnostic) => diagnostic.severity === "error");
@@ -266,6 +268,8 @@ export class Checker {
   private readonly formCallSites: { node: A.Call | A.Pipe; lambda: A.Lambda; report: Type }[] = [];
   /** `Events.kind(app, kind)` calls queued for manifest validation once types settle. */
   private readonly eventKindCalls: { app: string; kind: string; payload: Type; span: A.Span }[] = [];
+  /** `Actions.action(app, name)` calls queued for manifest validation once types settle. */
+  private readonly actionCalls: { app: string; name: string; input: Type; output: Type; span: A.Span }[] = [];
   /** `JSON.decode(x)` calls queued for external opaque-type check. */
   private readonly jsonDecodeCalls: { target: Type; span: A.Span }[] = [];
   /** Pure stream/validator callbacks queued for static purity verification (`{}`). */
@@ -1184,6 +1188,14 @@ export class Checker {
         this.eventKindCalls.push({ app: appArg.value, kind: kindArg.value, payload, span: node.span });
       }
     }
+    if (callee.binding?.library === "Actions" && callee.binding.name === "action" && first === null) {
+      const [appArg, nameArg] = positional;
+      if (appArg?.kind === "StringLiteral" && nameArg?.kind === "StringLiteral") {
+        const res = resolve(shape.result);
+        const [input, output] = res.tag === "con" ? res.args : [];
+        this.actionCalls.push({ app: appArg.value, name: nameArg.value, input: input ?? newVar(this.level), output: output ?? newVar(this.level), span: node.span });
+      }
+    }
     if (callee.binding?.library === "JSON" && callee.binding.name === "decode") {
       const res = resolve(shape.result);
       if (res.tag === "con" && res.name === "result" && res.args[0]) {
@@ -1950,6 +1962,12 @@ export class Checker {
     // Validate `Events.kind(app, kind)` calls against connector manifests.
     for (const ev of this.eventKindCalls) {
       for (const d of validateEventKindAgainstManifests(ev.app, ev.kind, ev.payload, ev.span, this.table, this.manifests)) {
+        this.diagnostics.push(d);
+      }
+    }
+    // Validate `Actions.action(app, name)` calls against connector manifests.
+    for (const action of this.actionCalls) {
+      for (const d of validateActionAgainstManifests(action.app, action.name, action.input, action.output, action.span, this.table, this.manifests)) {
         this.diagnostics.push(d);
       }
     }

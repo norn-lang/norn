@@ -19,6 +19,7 @@ const FAMILY_WORDS: Record<Family, string> = {
   say: "posts a message",
   judge: "asks the host’s judge whether a condition holds",
   spawn: "starts a scoped concurrent sub-task",
+  act: "has the host do something in a connected app",
 };
 
 export interface Panels {

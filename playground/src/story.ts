@@ -45,6 +45,10 @@ export function tell(entry: Entry): Line {
           return line(["Asked ", holder, " to choose: ", quote(request.text)], "reach", detail);
         case "ask":
           return line(["Asked ", holder, " ", quote(request.text)], "reach", detail);
+        case "prepare":
+          return line(["Asked the host to admit ", code(`${request.action?.app} ${request.text}`), ...(request.action?.input ? [" with ", code(request.action.input)] : []), ". Nothing is done yet."], "reach", detail);
+        case "perform":
+          return line(["Asked the host to do the prepared ", code(`${request.action?.app} ${request.text}`), ", once"], "reach", detail);
       }
     }
     case "rejected": {
@@ -99,6 +103,8 @@ function closed(request: RequestInfo, outcome: Extract<Entry, { kind: "closed" }
       const value = outcome.value;
       const answer: Run = value.type === "string" ? quote(value.value) : code(literal(value));
       if (who !== null) return line(["The judge decided ", answer], "good");
+      if (request.name === "prepare") return line(["The host admitted ", code(`${request.action?.app} ${request.text}`), ": it can be performed"], "good");
+      if (request.name === "perform") return line(["The host did ", code(`${request.action?.app} ${request.text}`), ": ", answer], "good");
       if (request.name === "run") return line([holder, " finished with ", answer], "good");
       return line([holder, " answered ", answer], "good");
     }

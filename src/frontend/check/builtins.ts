@@ -12,7 +12,7 @@ import {
 } from "./types.ts";
 
 /** The effect families of docs/types.md §8, in the order the effects summary lists them. */
-export const FAMILIES = ["ask", "confirm", "choose", "run", "wait", "handOver", "cancel", "say", "judge", "spawn"] as const;
+export const FAMILIES = ["ask", "confirm", "choose", "run", "wait", "handOver", "cancel", "say", "judge", "spawn", "act"] as const;
 export type Family = (typeof FAMILIES)[number];
 
 export const BASE_TYPES = ["string", "int", "float", "bool", "unit", "time", "duration", "participant", "ref", "json"] as const;
@@ -116,6 +116,26 @@ export function builtinTable(): TypeTable {
   });
   table.qualifiedTypes.set("Events.envelope", eventsEnvelope);
   table.records.push(eventsEnvelope);
+  // Standard capability interface `Actions` built-in types: `Actions.action<'i, 'o>` and `Actions.prepared<'o>`.
+  // Both are abstract: only the host makes an action's answer, and only `Actions.prepare` makes a `prepared`.
+  table.qualifiedTypes.set("Actions.action", typeInfo({
+    name: "Actions.action",
+    library: "Actions",
+    visibility: "pub",
+    kind: "abstract",
+    origin: "builtin",
+    params: ["i", "o"],
+    equality: { never: false, params: new Set([0, 1]) },
+  }));
+  table.qualifiedTypes.set("Actions.prepared", typeInfo({
+    name: "Actions.prepared",
+    library: "Actions",
+    visibility: "pub",
+    kind: "abstract",
+    origin: "builtin",
+    params: ["o"],
+    equality: { never: false, params: new Set([0]) },
+  }));
   return table;
 }
 
@@ -260,14 +280,15 @@ export function builtinValues(): Builtin[] {
 
 /**
  * Built-in data and capability modules (`String`, `List`, `Option`, `Result`,
- * `JSON`, `Events`), available via qualified access (`String.toLowerCase`,
- * `List.map`, `Events.events`, etc.). Pure functions except `Events.events`
- * which constructs a stream source.
+ * `JSON`, `Events`, `Actions`), available via qualified access
+ * (`String.toLowerCase`, `List.map`, `Events.events`, etc.). Pure functions
+ * except `Events.events`, which constructs a stream source, and
+ * `Actions.prepare` and `Actions.perform`, which make requests of the host.
  */
 export function builtinModuleExports(): Readonly<Record<string, readonly Builtin[]>> {
   const eq = () => newVar(GENERIC, null, true);
-  const wrap = (entries: [string, () => Type][]): Builtin[] =>
-    entries.map(([name, type]) => ({ name, family: null, type: type() }));
+  const wrap = (entries: ([string, () => Type] | [string, () => Type, Family])[]): Builtin[] =>
+    entries.map(([name, type, family]) => ({ name, family: family ?? null, type: type() }));
   return {
     String: wrap([
       ["toLowerCase", () => fun([t.string], [], t.string)],
@@ -328,6 +349,20 @@ export function builtinModuleExports(): Readonly<Record<string, readonly Builtin
           t.stream(con("Events.envelope", a)),
         );
       }],
+    ]),
+    Actions: wrap([
+      // An action of a connected app, by the app's and the action's name: `Actions.action("x", "post")`.
+      ["action", () => { const i = g(), o = g(); return fun([t.string, t.string], [], con("Actions.action", i, o)); }],
+      // Fixes exactly what will be done and has the host admit it; nothing is done yet.
+      ["prepare", () => {
+        const i = g(), o = g();
+        return fun([con("Actions.action", i, o), i], [optional("by", g("deadline")), optional("about", g())], t.request(con("Actions.prepared", o)));
+      }, "act"],
+      // Does what was prepared, once.
+      ["perform", () => {
+        const o = g();
+        return fun([con("Actions.prepared", o)], [optional("by", g("deadline"))], t.request(o));
+      }, "act"],
     ]),
   };
 }

@@ -415,7 +415,8 @@ implicitly in scope.
 `norn check --json` reports two things for each program:
 
 - **the effect families it may perform:** `ask`, `confirm`, `choose`, `run`,
-  `wait`, `handOver`, `cancel`, `say` and `judge`;
+  `wait`, `handOver`, `cancel`, `say`, `judge`, `spawn` and `act`
+  (`Actions.prepare` and `Actions.perform`, spec §6.3);
 - **the participant literals** that appear as their targets.
 
 These are computed over everything the program can reach, including the
