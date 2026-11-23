@@ -387,10 +387,17 @@ An action is done in two requests, both of the host:
 | `Actions.perform(prepared, ~by=?) : request<'o>` | Does what was prepared, once. Its answer is what the action gives back. |
 
 ```norn
-let ready = X.prepareVideo("@acme", video, "Stop pasting API keys.")->wait?
+type post = {account: string, text: string}
+type posted = {url: string}
+let postAction: Actions.action<post, posted> = Actions.action("x", "post")
+
+let ready = Actions.prepare(postAction, {account: "@acme", text: "Stop pasting API keys."})->wait?
 after(2026-11-24T01:00Z)->wait
-X.publish(ready)->wait
+Actions.perform(ready)->wait
 ```
+
+An application library gives the same thing its own words, so a program
+reads `X.preparePost("@acme", text)` and `X.publish(ready)`.
 
 - **Two requests, because admitting and doing happen at different times.**
   What an action may do without asking is the host's policy for that app, not

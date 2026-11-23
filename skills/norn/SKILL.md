@@ -206,10 +206,14 @@ time comes. `prepare` asks for admission at once, with the input fixed;
 program runs, never inside `List.map`, so a list is prepared recursively.
 
 ```norn
-let rec prepareAll = posts =>
-  switch posts {
+type post = {account: string, text: string}
+type posted = {url: string}
+let postAction: Actions.action<post, posted> = Actions.action("x", "post")
+
+let rec prepareAll = texts =>
+  switch texts {
   | [] => []
-  | [post, ...rest] => [X.preparePost("@acme", post), ...prepareAll(rest)]
+  | [text, ...rest] => [Actions.prepare(postAction, {account: "@acme", text}), ...prepareAll(rest)]
   }
 let slots = every(8h, ~from=2026-11-24T01:00Z)
 let rec publish = prepared =>
@@ -219,7 +223,7 @@ let rec publish = prepared =>
     switch request->wait {
     | Answered(ready) =>
       slots->wait
-      ignore(X.publish(ready)->wait)
+      ignore(Actions.perform(ready)->wait)
       publish(rest)
     | _ => publish(rest)   // declined: it takes no slot
     }
