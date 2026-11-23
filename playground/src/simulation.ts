@@ -27,8 +27,10 @@ export interface RequestInfo {
   id: string;
   /** Who holds it now, as in `@alice`; `@judge` for `judge`. */
   holder: string;
-  /** The verb that made it. */
-  name: "ask" | "confirm" | "choose" | "run" | "judge";
+  /** The verb that made it; `prepare` and `perform` are asked of the host's connected app (`Actions`). */
+  name: "ask" | "confirm" | "choose" | "run" | "judge" | "prepare" | "perform";
+  /** For `prepare` and `perform`: the connected app, and what a `prepare` fixed, as the program wrote it. */
+  action: { app: string; input: string | null } | null;
   /** The question, the task or the condition. */
   text: string;
   /** The options of a `choose`; `Yes` and `No` for a `confirm`. */
@@ -367,6 +369,7 @@ export class Simulation {
         const due: Run[] = info.by === null ? [] : [", due by ", time(info.by)];
         if (info.name === "judge") requests.push(["for the judge to decide ", quote(info.text), ...due]);
         else if (info.name === "run") requests.push(["for ", holder, " to finish ", quote(info.text), ...due]);
+        else if (info.action !== null) requests.push(["for the host to ", info.name === "prepare" ? "admit " : "do ", code(`${info.action.app} ${info.text}`), ...due]);
         else requests.push(["for ", holder, "’s answer to ", quote(info.text), ...due]);
       } else if (target.kind === "timer") {
         timers.push(["until ", time(target.at)]);
@@ -410,6 +413,7 @@ function requestInfo(request: LedgerRequest): RequestInfo {
     text: request.text,
     options: request.verb === "confirm" ? [variant("Yes"), variant("No")] : request.options,
     form: request.form,
+    action: request.action ? { app: request.action.app, input: request.context } : null,
     by: request.by,
     delegatedBy: request.delegatedBy ?? null,
   };

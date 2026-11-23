@@ -1,0 +1,33 @@
+// Standard Capability Interface: Actions
+//
+// Hosts implement this interface to do one thing in a connected app for a
+// program, without an agent run and without putting any app names or business
+// verbs into the host interface. Application libraries (`X`, `Gmail`, …) are
+// written in Norn on top of it.
+//
+// An action is done in two requests of the host (spec §6.3):
+//   prepare  fixes exactly what will be done and has the host admit it, as its
+//            policy for that app requires; nothing is done yet
+//   perform  does what was prepared, once
+
+// An action of a connected app. `'i` is what it takes, `'o` what it answers.
+type action<'i, 'o>
+
+// An admitted action with its input fixed. Only `prepare` answers one.
+type prepared<'o>
+
+// The action `name` of the connected app `app`, as in action("x", "post").
+// The checker reads both type arguments against the app's connector manifest.
+external action: (string, string) => action<'i, 'o>
+
+// Fixes `input` and asks the host to admit the action.
+//   Answered(prepared)  admitted: it can be performed
+//   Refused(why)        the host's policy, or whoever it asked, declined
+//   Broke(why)          it cannot be prepared: bad input, app not connected
+external prepare: (action<'i, 'o>, 'i, ~by: 'd=?, ~about: 'c=?) => request<prepared<'o>>
+
+// Does what was prepared, once.
+//   Answered(result)    done
+//   Refused(why)        the admission no longer holds, or it was performed before
+//   Broke(why)          it failed, or its outcome is unknown; the host does not try again
+external perform: (prepared<'o>, ~by: 'd=?) => request<'o>

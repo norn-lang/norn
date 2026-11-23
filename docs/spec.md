@@ -368,6 +368,67 @@ Streams compose:
 An occurrence caused by the program's own effects never wakes that same
 program. That is the guard against loops, and it needs no count limit.
 
+### 6.3 Actions
+
+Some things need no judgement when the time comes: a post that was written
+and approved yesterday goes out at nine. Starting an agent run for that
+spends a model on pressing a button, and makes the post depend on an agent
+being there. `Actions` is the standard capability through which a program has
+the host do one thing in a connected app, with nobody in between. It is the
+outgoing counterpart of `Events`: one interface, no app names in the
+language, and application libraries (`X`, `Gmail`) written in Norn on top.
+
+An action is done in two requests, both of the host:
+
+| Built-in | Meaning |
+|---|---|
+| `Actions.action(app, name) : Actions.action<'i, 'o>` | Names an action of a connected app. No effect. The checker reads `'i` and `'o` against the app's connector manifest. |
+| `Actions.prepare(action, input, ~by=?, ~about=?) : request<Actions.prepared<'o>>` | Fixes exactly what will be done, and has the host admit it. Nothing is done yet. |
+| `Actions.perform(prepared, ~by=?) : request<'o>` | Does what was prepared, once. Its answer is what the action gives back. |
+
+```norn
+let ready = X.prepareVideo("@acme", video, "Stop pasting API keys.")->wait?
+after(2026-11-24T01:00Z)->wait
+X.publish(ready)->wait
+```
+
+- **Two requests, because admitting and doing happen at different times.**
+  What an action may do without asking is the host's policy for that app, not
+  the program's: one host lets its author's programs post freely, another
+  puts every post in front of a person. `prepare` is where that policy is
+  met, with the input fixed, so whoever admits it sees exactly what will be
+  done. `perform` is when it is done. Between them the program is free to
+  wait for a time, a beat or an event, in the words it already has. A person
+  can therefore admit a week of posts in one sitting and each goes out in its
+  slot, with nobody awake.
+- **The replies** (§4.1):
+
+  | | `prepare` | `perform` |
+  |---|---|---|
+  | `Answered(x)` | admitted; `x` is the prepared action | done; `x` is what the action gave back |
+  | `Refused(why)` | the host's policy, or whoever it asked, declined | the admission no longer holds, or it was already performed |
+  | `Broke(why)` | it cannot be prepared: bad input, the app is not connected | it failed, or its outcome is not known |
+  | `NoReply` | `~by` passed and nobody had decided | `~by` passed before it was done |
+
+- **At most once.** A prepared action is performed once: a second `perform`
+  of it is `Refused`. Both requests are ledger entries, so a later pass, an
+  edit or an upgrade finds them again and does nothing twice (§9). When the
+  host cannot tell whether the action happened, because the app's answer was
+  lost, the reply is `Broke` and the host does not try again: a program that
+  wants a second attempt prepares a new action, which is admitted anew.
+- **A prepared action is not a credential.** It is a value only `prepare`
+  answers, it names its request, and it is good only in the ledger that
+  holds that request. Authority stays current (§10): the host admits
+  `perform` only while what was admitted still holds, such as the same
+  connection, the same account and an approver who may still approve.
+  Otherwise the reply is `Refused`, and nothing is done.
+- **The host holds these requests**, so they are nobody's to delegate or to
+  hand over. `cancel` calls one off; a prepared action that was never
+  performed is void when the program ends.
+- **Requests are made where the program runs.** `List.map` and the stream
+  combinators take pure functions, so several actions are prepared with a
+  recursive function, as several questions are asked.
+
 ## 7. Where programs live
 
 A program lives next to what it keeps true. In xMatrix that is a `norn` block in
@@ -503,9 +564,11 @@ program makes. §11.2 gives the rules for changing a program while it runs.
 ## 10. Safety and authority
 
 - **Capabilities, not restrictions.** A program reaches the world only through
-  §6. It cannot open sockets, read secrets, spend money or send mail. Those
-  things happen inside agent runs that `run` starts, under the agent's own
-  permissions and approval policies.
+  §6. It cannot open sockets or read secrets. Work that needs judgement
+  happens inside agent runs that `run` starts, under the agent's own
+  permissions and approval policies. What it does in a connected app by
+  itself (§6.3) is one of the actions the host declares, with its input
+  fixed and admitted under the host's policy for that app before it is done.
 - **Code can change; authority is current.** A program may be edited while it
   runs (§11.2). Every effect is admitted under the author's *current*
   grants. Authority lost during a long wait shows up as `Revoked`: as the
@@ -513,7 +576,11 @@ program makes. §11.2 gives the rules for changing a program while it runs.
   a fact or a stream, as the program's own result. Suspended state stores
   references to credentials, never credentials themselves.
 - **Naming is not granting.** Passing `@alice` to another program does not let
-  that program act as Alice.
+  that program act as Alice. Naming an action (`Actions.action("x", "post")`)
+  does nothing and admits nothing.
+- **Admitting is not granting.** A prepared action stands for one action with
+  one input, performed once. It gives the program nothing else in that app,
+  and it stops being good when what was admitted changes (§6.3).
 - **Delegating is not granting.** A delegate gives the request's answer and
   nothing else: they act with none of the delegator's other authority, and
   the program still performs every effect as its author.
@@ -956,3 +1023,27 @@ delegation is the same fenced change of holder as a handover or a take, so a
 request still has one holder and ends with one reply, and its `~by` and form
 do not change. What changes is the record: the ledger now says that a
 delegate answered, and for whom.
+
+## 18. Actions (2026-11-23)
+
+Daniel wanted to approve a batch of short videos when he had the time and
+have them posted three a day afterwards, whether or not any agent was
+running. The posting itself was already the host's work, but a program could
+only reach it through an agent run: §10 said a program "cannot send mail",
+and the host asked for approval at the moment of posting, so someone had to
+be there at each slot.
+
+| Before | Now | Why |
+|---|---|---|
+| A program touched a connected app only through `run` | `Actions.prepare` and `Actions.perform` ask the host itself (§6.3) | Doing what was already decided needs no judgement, and should not depend on an agent being there |
+| Outside events came in through `Events`; nothing went out | `Actions` is the outgoing standard capability, checked against the same connector manifests | One interface each way keeps app names and business verbs out of the language |
+| A host's approval was asked when the action ran | The input is fixed and admitted by `prepare`; `perform` does it later | Whoever approves sees exactly what will be done, once, ahead of time; the time it is done is the program's to say with `after`, `every` or an event |
+| `Refused` and `Broke` named a participant | For a request of the host they name the host: it declined, or it could not | The same six replies, and still one meaning each |
+
+**What it leaves sound.** A request of the host is a request like any other:
+one holder, one reply, an identity made of what is asked, so every pass finds
+it again and opens nothing twice. An action is therefore done at most once
+however often the program is evaluated, edited or upgraded. Programs stay
+pure: `Actions.action` computes a name, and the two effects are requests the
+ledger records. The checker treats them as effects, so a pure callback cannot
+make one, and as requests, so neither can be dropped.

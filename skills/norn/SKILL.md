@@ -52,6 +52,7 @@ handle each of these cases.
 | `choose(who, question, [A, B], ~by=?, ~about=?)` | `request<'a>`: one of the options, constructors of a variant type you declare. |
 | `run(who, task, ~context=?, ~by=?, ~about=?)` | `request<'a>`: someone works on a task and reports. The report has the type you use it as, such as `Sound \| Flawed(string)`; the holder is told that form. With nothing deciding it, it is the host's `report`. |
 | `judge(condition, ~about=?)` | `request<bool>`: the host's judge decides a condition stated in words. |
+| `Actions.prepare(action, input, ~by=?)`, `Actions.perform(prepared, ~by=?)` | Requests of the host itself, usually through an app library such as `X`. `prepare` fixes what will be done and has it admitted (`request<Actions.prepared<'o>>`); `perform` does it once (`request<'o>`). No agent runs. |
 | `r->wait` | `reply<'a>` for a request; the value itself for a fact or a stream. |
 | `r->waitUntil(t)` | `option<reply<'a>>` (or `option<'a>` for a fact or stream). `None`: this wait ran out, and the request stays open. |
 | `anyOf([a, b], ~except=?)` | `participant`: a group. Whoever takes the request first holds it; nobody else does. |
@@ -197,6 +198,33 @@ switch all(parts) {
 | [Answered(api), Answered(client)] => run(@grok, `Integrate ${api.text} with ${client.text}`)->wait
 | _ => run(anyOf([@claude, @codex, @grok]), "A part failed: find out which and why")->wait
 }
+```
+
+**Approve now, do later.** What a connected app does needs no agent when the
+time comes. `prepare` asks for admission at once, with the input fixed;
+`perform` does it when the program gets there. A request is made where the
+program runs, never inside `List.map`, so a list is prepared recursively.
+
+```norn
+let rec prepareAll = posts =>
+  switch posts {
+  | [] => []
+  | [post, ...rest] => [X.preparePost("@acme", post), ...prepareAll(rest)]
+  }
+let slots = every(8h, ~from=2026-11-24T01:00Z)
+let rec publish = prepared =>
+  switch prepared {
+  | [] => ()
+  | [request, ...rest] =>
+    switch request->wait {
+    | Answered(ready) =>
+      slots->wait
+      ignore(X.publish(ready)->wait)
+      publish(rest)
+    | _ => publish(rest)   // declined: it takes no slot
+    }
+  }
+publish(prepareAll(["First post", "Second post", "Third post"]))
 ```
 
 ## Habits
