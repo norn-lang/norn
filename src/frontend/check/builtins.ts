@@ -127,6 +127,25 @@ export function builtinTable(): TypeTable {
     params: ["i", "o"],
     equality: { never: false, params: new Set([0, 1]) },
   }));
+  // Standard capability interface `Holds`: what holds now, for each thing that has it.
+  table.qualifiedTypes.set("Holds.kind", typeInfo({
+    name: "Holds.kind", library: "Holds", visibility: "pub", kind: "abstract", origin: "builtin",
+    params: ["a"], equality: { never: false, params: new Set([0]) },
+  }));
+  table.qualifiedTypes.set("Holds.held", typeInfo({
+    name: "Holds.held", library: "Holds", visibility: "pub", kind: "abstract", origin: "builtin",
+    params: ["a"], equality: { never: false, params: new Set([0]) },
+  }));
+  const holdsMember = typeInfo({
+    name: "Holds.member", library: "Holds", visibility: "pub", kind: "record", origin: "builtin", params: [],
+    fields: [
+      { name: "id", type: t.string, decl: null },
+      { name: "present", type: t.bool, decl: null },
+    ],
+    equality: { never: false, params: new Set() },
+  });
+  table.qualifiedTypes.set("Holds.member", holdsMember);
+  table.records.push(holdsMember);
   table.qualifiedTypes.set("Actions.prepared", typeInfo({
     name: "Actions.prepared",
     library: "Actions",
@@ -351,6 +370,18 @@ export function builtinModuleExports(): Readonly<Record<string, readonly Builtin
           t.stream(con("Events.envelope", a)),
         );
       }],
+    ]),
+    Holds: wrap([
+      // A kind of thing that holds: `Holds.kind("page", "Products.Site")`, the `Products.Site` facts of the Space's Pages.
+      ["kind", () => { const a = g(); return fun([t.string, t.string], [], con("Holds.kind", a)); }],
+      // The things that have the kind: each one as it starts (`present: true`) or stops having it, from the whole set at first.
+      ["members", () => { const a = g(); return fun([con("Holds.kind", a)], [], t.stream(con("Holds.member"))); }],
+      // What holds for one thing, by its id.
+      ["held", () => { const a = g(); return fun([con("Holds.kind", a), t.string], [], con("Holds.held", a)); }],
+      // What holds for it now, read once in this scope and recorded: a later pass reads the same.
+      ["sample", () => { const a = g(); return fun([con("Holds.held", a)], [], t.option(a)); }],
+      // Each new value it has, and `None` when it stops having one.
+      ["changes", () => { const a = g(); return fun([con("Holds.held", a)], [], t.stream(t.option(a))); }],
     ]),
     Actions: wrap([
       // An action of a connected app, by the app's and the action's name: `Actions.action("x", "post")`.

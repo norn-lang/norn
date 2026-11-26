@@ -436,6 +436,48 @@ reads `X.preparePost("@acme", text)` and `X.publish(ready)`.
   combinators take pure functions, so several actions are prepared with a
   recursive function, as several questions are asked.
 
+### 6.4 Holds
+
+Events say what happened; some things are simply so for as long as they are:
+a site's domain and languages, a product's tier, whether a connector is still
+granted. `Holds` is the standard capability for what holds now
+(`interfaces/holds.norn`). A Space names its kinds of facts as types in its own
+libraries, and a host says what holds for each thing of a kind.
+
+- **Facts flow; code is pinned.** A changed value reaches the program without
+  anyone adopting it, as an occurrence does. What a program does with it is
+  its code, which changes only by an edit.
+- **A program samples.** `Holds.sample(h)` reads what holds once, in the scope
+  that asks, and the ledger records what it read. Every later pass of that
+  scope reads the same, so a round at work is never changed under it, and the
+  next round reads what holds then.
+- **Membership is a stream.** `Holds.members(kind)` gives each thing as it
+  starts or stops having the kind; a loop over it begins with the whole set.
+  `Holds.changes(h)` gives each new value of one thing. A value the host holds
+  quietly, such as one the program's own work wrote back, occurs on neither, so
+  a program does not wake itself.
+- **`Std.each`** keeps one branch per thing that has a kind, for as long as it
+  has it. It is written in Norn on `forEach(~each=Together, ~per=…)`: under
+  `~per`, a newer occurrence in a partition takes the place of that
+  partition's round and cancels what it left open, and other partitions go on.
+
+```norn
+open Std
+type site = {domain: string}
+each(Holds.kind("page", "site"), h =>
+  every(1d)->forEach(~key="daily", _ => switch Holds.sample(h) {
+  | Some(s) => ignore(run(@claude, `Report on ${s.domain}`)->wait)
+  | None => ()
+  }))
+```
+
+A **fact block** is how a Page states a fact: a block whose header names a
+type (`norn 1 facts Products.site`) and whose body is a value of it. The body
+holds only values: literals, lists, tuples, records and constructors of them.
+It has no names, functions, participants or effects, so reading one runs no
+code and carries nobody's authority. `checkFacts` checks a block against its
+type and gives the value.
+
 ## 7. Where programs live
 
 A program lives next to what it keeps true. In xMatrix that is a `norn` block in
