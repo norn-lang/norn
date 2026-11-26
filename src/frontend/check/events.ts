@@ -32,6 +32,7 @@ type prepared<'o>
 external action: (string, string) => action<'i, 'o>
 external prepare: (action<'i, 'o>, 'i, ~by: 'd=?, ~about: 'c=?) => request<prepared<'o>>
 external perform: (prepared<'o>, ~by: 'd=?) => request<'o>
+external read: (action<'i, 'o>, 'i, ~by: 'd=?, ~about: 'c=?) => request<'o>
 `;
 
 export interface ConnectorFieldSpec {
@@ -53,6 +54,8 @@ export interface ConnectorActionSpec {
   doc?: string;
   input: readonly ConnectorFieldSpec[];
   output: readonly ConnectorFieldSpec[];
+  /** `read` for an action that changes nothing, which a program does with `Actions.read`; otherwise it is prepared and performed. */
+  effect?: "read" | "write";
 }
 
 export interface ConnectorManifest {

@@ -51,7 +51,7 @@ export interface Machine {
   nextEnvironment: number;
   resumedAt: number;
 }
-const effectBuiltins = new Set(["ask", "confirm", "choose", "run", "wait", "waitUntil", "cancel", "handOver", "status", "say", "judge", "first", "sameAs", "spawn", "Actions.prepare", "Actions.perform", "Holds.sample"]);
+const effectBuiltins = new Set(["ask", "confirm", "choose", "run", "wait", "waitUntil", "cancel", "handOver", "status", "say", "judge", "first", "sameAs", "spawn", "Actions.prepare", "Actions.perform", "Actions.read", "Holds.sample"]);
 const builtins = new Set([
   ...effectBuiltins,
   "now", "show", "ignore", "fail", "or", "merge", "never", "map", "mapRequest", "filter", "filterMap", "scan", "timed", "gather",

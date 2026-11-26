@@ -209,3 +209,45 @@ Actions.prepare(a, {account: "@acme", text: "Hello"})`).length > 0);
 let a: Actions.action<post, posted> = Actions.action("x", "post")
 every(1d)->map(_ => Actions.prepare(a, {account: "@acme", text: "Hello"}))->forEach(_ => ())`).includes("impure-callback"));
 });
+
+test("a read is one request of the host, answered at once with nothing to admit, and a loop reads anew each round", () => {
+  const manifests: ConnectorManifest[] = [{
+    app: "cloudflare",
+    events: [],
+    actions: [{
+      name: "query_database", effect: "read",
+      input: [{ name: "target", type: "string" }, { name: "text", type: "string" }],
+      output: [{ name: "summary", type: "string" }, { name: "rows", type: "json" }],
+    }],
+  }];
+  const source = `type query = {target: string, text: string}
+type answer = {summary: string, rows: json}
+let q: Actions.action<query, answer> = Actions.action("cloudflare", "query_database")
+every(30m)->forEach(~key="check", _ => switch Actions.read(q, {target: "db", text: "SELECT 1"})->wait {
+| Answered(a) => if a.summary == "bad" { ignore(run(@claude, "fix it")->wait) } else { () }
+| _ => ()
+})`;
+  const checked = checkSource(source, { host, std: null, manifests });
+  assert.equal(checked.ok, true, JSON.stringify(checked.diagnostics));
+  const code = compile(elaborate(checked.program!, checked.reports, checked.formEvidence));
+  const ledger = emptyLedger();
+  evaluate(code, ledger, 0);
+  evaluate(code, ledger, 30 * 60_000);
+  const [read] = open(ledger);
+  assert.equal(read!.verb, "read");
+  assert.equal(read!.holder, appHolder("cloudflare"));
+  assert.deepEqual(read!.action?.name, "query_database");
+  const ok: Value = { type: "record", fields: { summary: text("ok"), rows: { type: "list", values: [] } } };
+  assert.equal(settle(ledger, read!.id, appHolder("cloudflare"), { tag: "Answered", value: ok }, 30 * 60_000 + 1), true);
+  evaluate(code, ledger, 30 * 60_000 + 2);
+  assert.deepEqual(open(ledger), []);
+  // The next round reads again, and an answer that says something is wrong asks for a fix.
+  evaluate(code, ledger, 60 * 60_000);
+  const [again] = open(ledger);
+  assert.equal(again!.verb, "read");
+  assert.notEqual(again!.id, read!.id);
+  const bad: Value = { type: "record", fields: { summary: text("bad"), rows: { type: "list", values: [] } } };
+  settle(ledger, again!.id, appHolder("cloudflare"), { tag: "Answered", value: bad }, 60 * 60_000 + 1);
+  evaluate(code, ledger, 60 * 60_000 + 2);
+  assert.deepEqual(open(ledger).map(r => [r.verb, r.text]), [["run", "fix it"]]);
+});

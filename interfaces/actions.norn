@@ -31,3 +31,11 @@ external prepare: (action<'i, 'o>, 'i, ~by: 'd=?, ~about: 'c=?) => request<prepa
 //   Refused(why)        the admission no longer holds, or it was performed before
 //   Broke(why)          it failed, or its outcome is unknown; the host does not try again
 external perform: (prepared<'o>, ~by: 'd=?) => request<'o>
+
+// Reads from the app what `input` asks, changing nothing: a query, a count, a
+// list. Nobody admits a read; it is done at once with the program author's own
+// access to the app, and only an action the app declares as a read can be read.
+//   Answered(result)    what the app answered
+//   Revoked             the author cannot read that app, or no longer can
+//   Broke(why)          the action is not a read, or the app could not answer
+external read: (action<'i, 'o>, 'i, ~by: 'd=?, ~about: 'c=?) => request<'o>
