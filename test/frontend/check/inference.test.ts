@@ -79,7 +79,7 @@ test("a call gives every positional argument and every required label, and only 
   );
   assert.equal(message(`${define}ignore(f(~b=1))`, "argument-count"), "expected 1 positional argument for f, found 0; its type is (int, ~b: int, ~c: int=?) => int");
   assert.equal(message(`${define}ignore(f(1, ~b=1, ~d=2))`, "unknown-label"), "f has no labelled argument ~d; it takes ~b and ~c");
-  assert.equal(message(`ignore(run(@alice, "q", ~contxt=1)->wait)`, "unknown-label"), "run has no labelled argument ~contxt; it takes ~context, ~by and ~about; did you mean ~context?");
+  assert.equal(message(`ignore(run(@alice, "q", ~contxt=1)->wait)`, "unknown-label"), "run has no labelled argument ~contxt; it takes ~key, ~context, ~by and ~about; did you mean ~context?");
   assert.equal(message(`${define}ignore(f(1, ~b=1, ~b=2))`, "duplicate-label"), "~b is passed twice");
   assert.equal(message("let g = x => x\nignore(g(1, ~b=1))", "unknown-label"), "g has no labelled argument ~b; it takes no labelled arguments");
   // The value before -> counts as the first argument.

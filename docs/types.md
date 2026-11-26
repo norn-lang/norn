@@ -171,11 +171,11 @@ returned unchanged.
 
 | Built-in | Type |
 |---|---|
-| `ask` | `(participant, string, ~by: 'd=?, ~about: 'b=?) => request<string>` |
-| `confirm` | `(participant, string, ~by: 'd=?, ~about: 'b=?) => request<yesno>` |
-| `choose` | `(participant, string, list<'a>, ~by: 'd=?, ~about: 'b=?) => request<'a>` |
-| `run` | `(participant, string, ~context: 'c=?, ~by: 'd=?, ~about: 'b=?) => request<'a>` (§5a) |
-| `judge` | `(string, ~about: 'b=?) => request<bool>` |
+| `ask` | `(participant, string, ~key: string=?, ~by: 'd=?, ~about: 'b=?) => request<string>` |
+| `confirm` | `(participant, string, ~key: string=?, ~by: 'd=?, ~about: 'b=?) => request<yesno>` |
+| `choose` | `(participant, string, list<'a>, ~key: string=?, ~by: 'd=?, ~about: 'b=?) => request<'a>` |
+| `run` | `(participant, string, ~key: string=?, ~context: 'c=?, ~by: 'd=?, ~about: 'b=?) => request<'a>` (§5a) |
+| `judge` | `(string, ~key: string=?, ~about: 'b=?) => request<bool>` |
 | `wait` | `(source<'k, 'w>) => 'w`: `reply<'a>` for a `request<'a>`, `'a` for an `event<'a>` or a `stream<'a>` |
 | `waitUntil` | `(source<'k, 'w>, 'd) => option<'w>` |
 | `anyOf` | `(list<participant>, ~except: participant=?) => participant` |

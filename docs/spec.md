@@ -807,17 +807,29 @@ program and starting again would ask everyone the same things twice.
   program if a later pass reaches it. This rule exists because turning two
   parallel requests into a sequence would otherwise cancel the second and
   issue it again later.
-- **A changed text is a new request.** Whoever applies the edit may declare
-  that it continues an existing one; the declaration is a ledger entry.
+- **A changed text is a new request.** A request without `~key` is found by
+  what it asks of whom; whoever applies the edit may declare that it continues
+  an existing one, and the declaration is a ledger entry.
+- **A key names a slot, not a consent.** `ask`, `confirm`, `choose`, `run` and
+  `judge` take `~key`: the request is then found by its scope and key alone, so
+  the preview shows an edit to it as a revision of that slot. An answer holds
+  only for the terms it answered: its text, options, participant, `~about`,
+  `~context` and `form`. When the program asks a keyed slot on other terms, the
+  old request is superseded: an open one is cancelled, an answered one keeps its
+  answer in the ledger, and a new request is opened in its place. A card is
+  never rewritten in place. `~by` is not a term, so moving it amends.
 - **An upgrade is an edit.** A new version of the language, the evaluator or
   the standard library is applied the same way. A program whose difference is
   not empty stops with a notice to its author, and does not go on silently.
-- **Requests that can be identical must be told apart.** If an edit puts a
-  request in front of an identical one, the new one takes the old answer. A
-  program that can make two identical requests must distinguish them by what
-  they are about or by their words. The checker refuses two such requests
-  when both are written with literals (`same-request`); it cannot see two
-  whose texts are computed.
+- **One request per address in a scope.** The address of a request is its
+  scope and either its key or what it asks of whom; evaluation order is never
+  part of it. Two requests at one address in one scope, whether open together
+  or one after the other, are a program error. A program that asks the same
+  thing more than once gives each request its own `~key` (an attempt number in
+  a recursion, for example) or asks it in its own scope (each round of a
+  `forEach` is one). The checker refuses two such requests when both are
+  written with literals (`same-request`). A ledger started before this rule
+  keeps numbering repeats so its program goes on, and each pass reports them.
 
 **What this costs.** A pass reads the whole history of its program, and the
 evaluator must give the same result across versions, or upgrades must be
@@ -941,8 +953,7 @@ from projection.
      authenticated messages. This is the current assumption.
    - (b) Waiting programs live on participants' own machines.
 4. **Identity under edits.** How the checker finds requests whose computed
-   texts can be identical, and how a name for a long-lived request is
-   written.
+   texts can be identical before a pass does.
 5. **Concrete syntax details.**
    - Time literals.
    - `?` on nested replies.

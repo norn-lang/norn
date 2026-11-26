@@ -125,7 +125,7 @@ ignore((b, e, g, h, k, m, u))`), {
     z: "'a",
   });
   // Every request verb is an ordinary function, and can be passed as a value.
-  assert.equal(typeOf("let f = ask", "f"), "(participant, string, ~by: 'a=?, ~about: 'b=?) => request<string> where 'a: deadline");
+  assert.equal(typeOf("let f = ask", "f"), "(participant, string, ~key: string=?, ~by: 'a=?, ~about: 'b=?) => request<string> where 'a: deadline");
   assert.equal(typeOf("let w = r => r->wait", "w"), "((event|stream|request)<'a>) => 'a");
 });
 
