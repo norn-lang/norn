@@ -4,7 +4,7 @@ import { test } from "node:test";
 import { checkSource } from "../../src/frontend/check/index.ts";
 import { referenceOptions } from "../../src/frontend/check/node.ts";
 import { compile } from "../../src/runtime/code.ts";
-import { hold, holdKind } from "../../src/runtime/ledger.ts";
+import { deliverEvent, hold, holdKind } from "../../src/runtime/ledger.ts";
 import { text, type Value } from "../../src/runtime/value.ts";
 import { HOUR, answered, report, reply, started, tree } from "./helpers.ts";
 
@@ -86,4 +86,52 @@ let k = Holds.kind("page", "sight")`, referenceOptions());
   assert.equal(misspelled.ok, false);
   assert.equal(misspelled.diagnostics[0]?.code, "unknown-hold-type");
   assert.match(misspelled.diagnostics[0]?.message ?? "", /unknown type sight in Holds.kind/u);
+});
+
+test("each -> spawn -> Events.events exposes the nested stream in pass.listening and dispatches on event arrival", () => {
+  const source = `open Std
+type service = {project: string}
+type issue = {summary: string}
+let issues: Events.kind<issue> = Events.kind("sentry", "issue.created")
+each(~key="services", Holds.kind("page", "service"), h => switch Holds.sample(h) {
+| Some(start) =>
+  let sentry = spawn(() =>
+    Events.events(issues, ~source=\`sentry:\${start.project}\`)->forEach(~key="pushed", ~each=Queue, e => switch Holds.sample(h) {
+    | Some(s) => ignore(run(@claude, \`Fix \${s.project}: \${e.data.summary}\`)->wait)
+    | None => ()
+    }))
+  every(6h)->forEach(~key="pulled", _ => ())
+  ignore(sentry->wait)
+| None => ()
+})`;
+  const checked = checkSource(source, referenceOptions());
+  assert.ok(checked.ok, JSON.stringify(checked.diagnostics));
+  const { team } = started(compile(checked.program!, { std }));
+  const SERVICE = holdKind("page", "service");
+  hold(team.ledger, SERVICE, "page-1", { type: "record", fields: { project: text("billing-api") } }, 0);
+
+  const first = team.run();
+  assert.equal(first.status, "waiting");
+  const sentryStreams = first.listening.filter(s => s.name === "Events.events");
+  assert.equal(sentryStreams.length, 1, "nested spawn Events.events stream must surface in pass.listening");
+  assert.deepEqual(sentryStreams[0]!.labels.source, text("sentry:billing-api"));
+
+  const delivery = deliverEvent(team.ledger, {
+    app: "sentry", kind: "issue.created", source: "sentry:billing-api", id: "evt-1",
+    data: { type: "record", fields: { summary: text("Issue 42 created") } },
+  }, 1_000, { matchSources: sentryStreams });
+  assert.equal(delivery.delivered, true);
+
+  team.advanceTo(1_000);
+  const afterEvent = team.run();
+  assert.equal(afterEvent.status, "waiting");
+  assert.deepEqual(runs(team), ["Fix billing-api: Issue 42 created"]);
+  assert.equal(afterEvent.listening.filter(s => s.name === "Events.events").length, 1,
+    "Events.events stream remains listened to while its Queue handler is in flight");
+
+  hold(team.ledger, SERVICE, "page-1", null, 2_000);
+  team.advanceTo(2_000);
+  const afterRetract = team.run();
+  assert.equal(afterRetract.listening.filter(s => s.name === "Events.events").length, 0,
+    "retracting the held fact cancels the branch and drops its nested Events.events stream");
 });

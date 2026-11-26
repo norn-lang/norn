@@ -997,6 +997,7 @@ export function* slices(code: Code, source: Ledger, now: number, options: PassOp
   const activeLoopStack: { storageKey: string; displayKey: string }[] = [];
   const deadlineStack: number[] = [];
   const spawnOwnerStack: string[] = [];
+  const childListening: { owner: string | null; source: Source }[] = [];
   const currentScope = (): string => scopeStack.at(-1) ?? "root";
   const currentSpawnOwner = (): string | null => spawnOwnerStack.at(-1) ?? null;
   const clampBy = (rawBy: number | null): number | null => {
@@ -2134,7 +2135,18 @@ export function* slices(code: Code, source: Ledger, now: number, options: PassOp
         if (!(error instanceof ProgramError)) throw error;
         return { kind: "failed", outcome: null, error: error.message };
       }
-      if (!resumption) return { kind: "waiting" };
+      if (!resumption) {
+        if (pass.status === "waiting") {
+          const owner = currentSpawnOwner();
+          for (const source of target.frames.flatMap(frame => frame.kind === "forEach" ? hostStreams(frame.stream) : [])) {
+            childListening.push({ owner, source });
+          }
+          for (const waited of pass.waiting?.targets ?? []) {
+            if (waited.kind === "stream") childListening.push({ owner, source: waited.source });
+          }
+        }
+        return { kind: "waiting" };
+      }
       const { name, args } = control.effect;
       const mapped = !lastWaitEvaluated && (name === "wait" || name === "waitUntil") ? through(args[0], resumption.value, name) : null;
       if (mapped) resumeThrough(target, mapped.value, mapped.steps, resumption.at);
@@ -2172,7 +2184,21 @@ export function* slices(code: Code, source: Ledger, now: number, options: PassOp
   }
 
   pass.reached = [...reached];
-  if (pass.status === "waiting") pass.listening = machine.frames.flatMap(frame => frame.kind === "forEach" ? hostStreams(frame.stream) : []);
+  if (pass.status === "waiting") {
+    const streams: Source[] = [
+      ...machine.frames.flatMap(frame => frame.kind === "forEach" ? hostStreams(frame.stream) : []),
+      ...childListening
+        .filter(item => item.owner === null || ledger.requests[item.owner]?.reply === null)
+        .map(item => item.source),
+    ];
+    const seenStreams = new Set<string>();
+    pass.listening = streams.filter(stream => {
+      const key = eventKey(stream as unknown as Value);
+      if (seenStreams.has(key)) return false;
+      seenStreams.add(key);
+      return true;
+    });
+  }
   for (const request of Object.values(ledger.requests)) {
     if (request.reply !== null) continue;
     // Ending a program cancels what it left open, in the same commit that records its result.
