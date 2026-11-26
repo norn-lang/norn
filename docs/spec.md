@@ -432,6 +432,12 @@ reads `X.preparePost("@acme", text)` and `X.publish(ready)`.
 - **The host holds these requests**, so they are nobody's to delegate or to
   hand over. `cancel` calls one off; a prepared action that was never
   performed is void when the program ends.
+- **A read changes nothing, so nobody admits it.** `Actions.read(action, input)`
+  asks the app something (a query, a count, a list) and is answered at once with
+  the program author's own access to that app; only an action the connector
+  declares as a read can be read. It lets a program look before it asks anyone:
+  a check every half hour costs no agent run, and only an answer that says
+  something is wrong asks someone to act.
 - **Requests are made where the program runs.** `List.map` and the stream
   combinators take pure functions, so several actions are prepared with a
   recursive function, as several questions are asked.
