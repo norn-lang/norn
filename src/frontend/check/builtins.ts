@@ -154,16 +154,18 @@ export function builtinValues(): Builtin[] {
   const by = () => optional("by", g("deadline"));
   // What a request is about: the thing, and through its value the version.
   const about = () => optional("about", g());
+  // A request's own name in its scope: an answer holds for this slot only while its terms stay the same.
+  const key = () => optional("key", t.string);
   const values: [string, Family | null, () => Type][] = [
-    ["ask", "ask", () => fun([t.participant, t.string], [by(), about()], t.request(t.string))],
-    ["confirm", "confirm", () => fun([t.participant, t.string], [by(), about()], t.request(t.yesno))],
+    ["ask", "ask", () => fun([t.participant, t.string], [key(), by(), about()], t.request(t.string))],
+    ["confirm", "confirm", () => fun([t.participant, t.string], [key(), by(), about()], t.request(t.yesno))],
     ["choose", "choose", () => {
       const a = g();
-      return fun([t.participant, t.string, t.list(a)], [by(), about()], t.request(a));
+      return fun([t.participant, t.string, t.list(a)], [key(), by(), about()], t.request(a));
     }],
     // A run reports what the program uses its report as (§5a); `report` when nothing decides it.
-    ["run", "run", () => fun([t.participant, t.string], [optional("context", g()), by(), about()], t.request(g()))],
-    ["judge", "judge", () => fun([t.string], [optional("about", g())], t.request(t.bool))],
+    ["run", "run", () => fun([t.participant, t.string], [key(), optional("context", g()), by(), about()], t.request(g()))],
+    ["judge", "judge", () => fun([t.string], [key(), optional("about", g())], t.request(t.bool))],
     // Waiting on a source gives what it holds: a reply for a request, the value for a fact or a stream.
     ["wait", "wait", () => {
       const w = g();

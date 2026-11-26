@@ -70,12 +70,12 @@ run(@grok, \`Integrate \${a.text} with \${b.text}\`)->wait`);
   assert.deepEqual(evaluate(code, ledger, 9).opened.map(r => r.text), ["Integrate api v1 with client v1"]);
 });
 
-test("asking again in a loop is a new request each time", () => {
-  const code = program(`let rec until = () => switch ask(@alice, "Is it fixed?")->wait {
+test("asking again in a loop is a new request each time when each attempt has its own key", () => {
+  const code = program(`let rec until = attempt => switch ask(@alice, "Is it fixed?", ~key=\`attempt \${attempt->show}\`)->wait {
 | Answered("yes") => Answered("fixed")
-| _ => until()
+| _ => until(attempt + 1)
 }
-until()`);
+until(1)`);
   const ledger = emptyLedger();
   evaluate(code, ledger, 0);
   settle(ledger, open(ledger)[0].id, "@alice", answered(text("not yet")), 1);
@@ -84,6 +84,20 @@ until()`);
   settle(ledger, open(ledger)[0].id, "@alice", answered(text("yes")), 2);
   assert.equal(evaluate(code, ledger, 2).status, "completed");
   assert.equal(Object.keys(ledger.requests).length, 2);
+});
+
+test("asking the same thing twice in one scope is a program error, even one after the other", () => {
+  const code = program(`let rec until = () => switch ask(@alice, "Is it fixed?")->wait {
+| Answered("yes") => Answered("fixed")
+| _ => until()
+}
+until()`);
+  const ledger = emptyLedger();
+  evaluate(code, ledger, 0);
+  settle(ledger, open(ledger)[0].id, "@alice", answered(text("not yet")), 1);
+  const pass = evaluate(code, ledger, 1);
+  assert.equal(pass.status, "failed");
+  assert.match(pass.error ?? "", /give each its own ~key/u);
 });
 
 test("a plan edited while it runs keeps every request it still makes", () => {
@@ -231,17 +245,83 @@ test("a program that never waits fails in the open", () => {
   assert.match(pass.error!, /too long/);
 });
 
-test("known limit: identical requests are told apart only by their order", () => {
+test("an identical question put in front cannot take over an answer: addresses are unique in a scope", () => {
   const ledger = emptyLedger();
   evaluate(program(`ask(@alice, "OK?")->wait?
 run(@codex, "Go")->wait`), ledger, 0);
   settle(ledger, open(ledger)[0].id, "@alice", answered(text("ok for stage one")), 1);
-  // The edit puts another identical question in front. It takes over the old answer.
-  const pass = evaluate(program(`let early = ask(@alice, "OK?")->wait?
+  const duplicate = evaluate(program(`let early = ask(@alice, "OK?")->wait?
 ask(@alice, "OK?")->wait?
-run(@codex, \`Go: \${early}\`)->wait`), ledger, 2);
-  assert.deepEqual(pass.opened.map(r => r.text), ["OK?"]);
-  // Hence the rule for the checker: two requests that can be identical must be told apart by ~about or a name.
+run(@codex, \`Go: \${early}\`)->wait`), ledger, 2, { commit: false });
+  assert.equal(duplicate.status, "failed");
+  // With a key, the new question is its own request and the old answer stays with its own slot.
+  const keyed = evaluate(program(`let early = ask(@alice, "OK?", ~key="early")->wait?
+ask(@alice, "OK?")->wait?
+run(@codex, \`Go: \${early}\`)->wait`), ledger, 3);
+  assert.deepEqual(keyed.opened.map(r => r.text), ["OK?"]);
+  assert.equal(keyed.status, "waiting");
+});
+
+test("a keyed request asked on other terms is asked anew: an answer holds only for the terms it answered", () => {
+  const ledger = emptyLedger();
+  evaluate(program(`confirm(@daniel, "Spend $50 on DataForSEO?", ~key="budget")->wait?`), ledger, 0);
+  const first = open(ledger)[0];
+  settle(ledger, first.id, "@daniel", answered(variant("Yes")), 1);
+  const pass = evaluate(program(`confirm(@daniel, "Spend $50,000 on ads?", ~key="budget")->wait?`), ledger, 2);
+  assert.equal(pass.status, "waiting");
+  assert.deepEqual(pass.opened.map(r => r.text), ["Spend $50,000 on ads?"]);
+  assert.deepEqual(pass.superseded, [{ id: first.id, by: pass.opened[0]!.id, wasOpen: false }]);
+  assert.equal(ledger.requests[first.id]!.reply?.tag, "Answered");
+});
+
+test("an open keyed request on new terms is withdrawn and asked again, never rewritten in place", () => {
+  const ledger = emptyLedger();
+  evaluate(program(`confirm(@daniel, "Spend $50?", ~key="budget")->wait?`), ledger, 0);
+  const first = open(ledger)[0];
+  const pass = evaluate(program(`confirm(@daniel, "Spend $50,000?", ~key="budget")->wait?`), ledger, 1);
+  assert.equal(ledger.requests[first.id]!.reply?.tag, "Cancelled");
+  assert.equal(ledger.requests[first.id]!.text, "Spend $50?");
+  assert.deepEqual(pass.superseded, [{ id: first.id, by: pass.opened[0]!.id, wasOpen: true }]);
+  assert.equal(open(ledger).length, 1);
+  assert.equal(open(ledger)[0].text, "Spend $50,000?");
+});
+
+test("moving a keyed request's deadline amends the same request", () => {
+  const ledger = emptyLedger();
+  evaluate(program(`confirm(@daniel, "Ship?", ~key="ship", ~by=1h)->wait?`), ledger, 0);
+  const first = open(ledger)[0];
+  const pass = evaluate(program(`confirm(@daniel, "Ship?", ~key="ship", ~by=3h)->wait?`), ledger, 1);
+  assert.deepEqual(pass.opened, []);
+  assert.deepEqual(pass.superseded, []);
+  assert.equal(open(ledger)[0].id, first.id);
+  assert.equal(open(ledger)[0].by, 3 * HOUR);
+});
+
+test("a ledger started before unique addresses keeps numbering repeats and reports them", () => {
+  const ledger = emptyLedger();
+  delete ledger.uniqueAddresses;
+  const code = program(`let rec until = () => switch ask(@alice, "Is it fixed?")->wait {
+| Answered("yes") => Answered("fixed")
+| _ => until()
+}
+until()`);
+  evaluate(code, ledger, 0);
+  settle(ledger, open(ledger)[0].id, "@alice", answered(text("not yet")), 1);
+  const pass = evaluate(code, ledger, 1);
+  assert.equal(pass.status, "waiting");
+  assert.equal(pass.duplicateAddresses.length, 1);
+  assert.equal(Object.keys(ledger.requests).length, 2);
+});
+
+test("a request recorded with a numbered address is found at its unique address", () => {
+  const ledger = emptyLedger();
+  const code = program(`confirm(@alice, "Ship?")->wait?`);
+  evaluate(code, ledger, 0);
+  const request = open(ledger)[0];
+  ledger.requests[request.id]!.address = `${request.address}#1`;
+  const pass = evaluate(code, ledger, 1);
+  assert.deepEqual(pass.opened, []);
+  assert.equal(open(ledger)[0].id, request.id);
 });
 
 test("a run's report must have the form the program uses it as, and an earlier holding's answer does not count", () => {

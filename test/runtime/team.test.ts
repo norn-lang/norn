@@ -57,14 +57,14 @@ run(@codex, "verify live")->wait`));
 });
 
 test("keep-going recursion wakes on a PR event, then stops when the judge says done", () => {
-  const { team } = started(`let rec push = () => {
-  let report = run(@codex, "advance PR")->wait?
-  if !(judge("complete?", ~about=report)->wait?) {
+  const { team } = started(`let rec push = attempt => {
+  let report = run(@codex, "advance PR", ~key=\`advance \${attempt->show}\`)->wait?
+  if !(judge("complete?", ~key=\`judge \${attempt->show}\`, ~about=report)->wait?) {
     prActivity("acme/api#1")->or(after(1h))->wait
-    push()
+    push(attempt + 1)
   }
 }
-push()`);
+push(1)`);
   for (const complete of [false, true]) {
     reply(team, open(team, "run"), answered(report("report"))); team.run();
     reply(team, open(team, "judge"), answered({ type: "bool", value: complete }));

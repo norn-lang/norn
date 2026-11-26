@@ -22,6 +22,13 @@ export interface LedgerRequest {
    * where `id` itself serves as the lookup address.
    */
   address?: string;
+  /**
+   * Digest of the terms a keyed request put to its holder (text, options,
+   * participant, `~about`, `~context`, `form`). An answer holds only for the
+   * terms it answered: when the program asks the same `~key` on other terms,
+   * this request is superseded and a new one is opened.
+   */
+  terms?: string;
   verb: string;
   holder: string;
   /** For a request offered to a group with `anyOf`: who may take it. Null once taken, and for a request to one participant. */
@@ -98,6 +105,13 @@ export interface Ledger {
    * - `2`: three-layer scoped identity (`~key` + occurrence-keyed rounds + sealed rounds + `form` out of identity)
    */
   identityScheme?: 1 | 2;
+  /**
+   * Set on ledgers started since request addresses became unique within a
+   * scope: two requests at one address are then a program error. A ledger
+   * without it keeps numbering repeats (`#2`, `#3`) so programs already
+   * running go on, and every pass reports the repeats in `duplicateAddresses`.
+   */
+  uniqueAddresses?: true;
   startedAt: number;
   requests: Record<string, LedgerRequest>;
   entries: Record<string, Entry>;
@@ -216,6 +230,7 @@ export interface Delegation {
 }
 export const emptyLedger = (startedAt = 0, options: { identityScheme?: 1 | 2 } = {}): Ledger => ({
   identityScheme: options.identityScheme ?? 2,
+  ...((options.identityScheme ?? 2) === 2 ? { uniqueAddresses: true as const } : {}),
   startedAt, requests: {}, entries: {}, facts: {}, occurrences: [], evidence: [], delegations: [], ended: null,
 });
 
@@ -287,6 +302,10 @@ export interface Pass {
   formChanged: { id: string; from: ReportForm | null; to: ReportForm | null }[];
   /** Answered requests whose recorded answer no longer fits the edited program's form. */
   incompatibleAnswers: { id: string; reason: string; form: ReportForm | null }[];
+  /** Keyed requests whose terms the program changed: the old request (cancelled if it was open) and the one asked in its place. */
+  superseded: { id: string; by: string; wasOpen: boolean }[];
+  /** On a ledger without `uniqueAddresses`: addresses a pass reached more than once, still numbered so the program goes on. */
+  duplicateAddresses: string[];
   /** Answers rejected by an `accepting` request validator during this pass. */
   validationErrors?: { id: string; reason: string; errors: FormPathError[] }[];
   /** All request IDs (open or answered) reached by this pass. */
@@ -337,7 +356,7 @@ export const appHolder = (app: string): string => `app:${app}`;
 export const preparedAction = (request: Pick<LedgerRequest, "id">): Value => variant("Prepared", text(request.id));
 const LABELS: Record<string, string[]> = {
   "Actions.prepare": ["by", "about"], "Actions.perform": ["by"],
-  ask: ["by", "about"], confirm: ["by", "about"], choose: ["by", "about"], run: ["context", "by", "about", "form"], judge: ["about"],
+  ask: ["key", "by", "about"], confirm: ["key", "by", "about"], choose: ["key", "by", "about"], run: ["key", "context", "by", "about", "form"], judge: ["key", "about"],
   wait: [], waitUntil: [], cancel: [], handOver: [], status: [], say: [], first: [], sameAs: [], spawn: ["key"], withinEnter: [], withinExit: [],
 };
 
@@ -913,7 +932,7 @@ function resolveAddress(address: string, moves: readonly MovedAddress[] | undefi
 export function* slices(code: Code, source: Ledger, now: number, options: PassOptions = {}): Generator<undefined, Pass> {
   const pass: Pass = {
     status: "waiting", result: null, error: null, log: [], opened: [], unreached: [], cancelled: [],
-    rescheduled: [], formChanged: [], incompatibleAnswers: [], reached: [], loops: [], said: [],
+    rescheduled: [], formChanged: [], incompatibleAnswers: [], superseded: [], duplicateAddresses: [], reached: [], loops: [], said: [],
     waiting: null, listening: [], nextDue: null,
   };
   if (source.ended) return { ...pass, status: source.ended.status, result: source.ended.result, error: source.ended.error };
@@ -1029,6 +1048,33 @@ export function* slices(code: Code, source: Ledger, now: number, options: PassOp
     const ordinal = (map.get(kind + digest) ?? 0) + 1;
     map.set(kind + digest, ordinal);
     return scope === "root" ? `${kind}:${digest}#${ordinal}` : `${kind}:${scope}/${digest}#${ordinal}`;
+  };
+  // Request addresses (identityScheme 2): one request per address in a scope, whatever the evaluation order.
+  // The address is the scope path and either the request's `~key` or what it asks of whom.
+  const usedRequestAddresses = new Set<string>();
+  const requestAddress = (content: unknown, key: string | null): string => {
+    const scope = currentScope();
+    const local = key !== null ? `key:${key}` : sha256(eventKey(content as Value)).slice(0, 16);
+    const base = scope === "root" ? `request:${local}` : `request:${scope}/${local}`;
+    if (!usedRequestAddresses.has(base)) { usedRequestAddresses.add(base); return base; }
+    if (ledger.uniqueAddresses) {
+      throw new ProgramError(key !== null
+        ? `Two requests with ~key="${key}" in the same scope`
+        : "Two requests ask the same thing of the same participant in one scope; give each its own ~key");
+    }
+    let n = 2;
+    while (usedRequestAddresses.has(`${base}#${n}`)) n++;
+    usedRequestAddresses.add(`${base}#${n}`);
+    if (!pass.duplicateAddresses.includes(base)) pass.duplicateAddresses.push(base);
+    return `${base}#${n}`;
+  };
+  // A request recorded before addresses became unique carries a `#1` suffix: it is the same request.
+  const requestAt = (address: string): LedgerRequest | undefined => {
+    const found = byAddress.get(address);
+    if (found || /#\d+$/u.test(address)) return found;
+    const legacy = byAddress.get(`${address}#1`);
+    if (legacy) { byAddress.delete(`${address}#1`); legacy.address = address; byAddress.set(address, legacy); }
+    return legacy;
   };
   const entry = (key: string, make: () => Entry): Entry => ledger.entries[key] ??= make();
   const reached = new Set<string>();
@@ -1184,6 +1230,7 @@ export function* slices(code: Code, source: Ledger, now: number, options: PassOp
     }
 
     if (VERBS.includes(name)) {
+      let pendingSupersede: { id: string; wasOpen: boolean } | null = null;
       const holder = name === "judge" ? "@judge" : participant(args[0]);
       const question = name === "judge" ? args[0] : args[1];
       if (args.length !== (name === "judge" ? 1 : name === "choose" ? 3 : 2) || question?.type !== "string") {
@@ -1194,13 +1241,30 @@ export function* slices(code: Code, source: Ledger, now: number, options: PassOp
         throw new ProgramError("choose options must be a nonempty list of constructors");
       }
       const nextForm = labels.form?.type === "string" && labels.form.value !== "" ? JSON.parse(labels.form.value) as ReportForm : null;
-      const { by: _by, form: _form, ...keptV2 } = labels;
+      if (labels.key !== undefined && (labels.key.type !== "string" || labels.key.value === "")) throw new ProgramError(`${name} ~key needs a nonempty string`);
+      if (labels.key !== undefined && !v2) throw new ProgramError(`${name} ~key requires an identityScheme 2 ledger; migrate this v1 ledger first`);
+      const requestKey = labels.key?.type === "string" ? labels.key.value : null;
+      const { by: _by, form: _form, key: _key, ...keptV2 } = labels;
       const { by: _by1, ...keptV1 } = labels;
       const kept = v2 ? keptV2 : keptV1;
       // The participant's own arguments count: @auto(~repo="a") and @auto(~repo="b") are asked different things.
-      const address = identity("request", { name, who: name === "judge" ? null : args[0], args: args.slice(name === "judge" ? 0 : 1), labels: kept });
+      const content = { name, who: name === "judge" ? null : args[0], args: args.slice(name === "judge" ? 0 : 1), labels: kept };
+      const address = v2 ? requestAddress(content, requestKey) : identity("request", content);
       const resolvedAddress = v2 ? resolveAddress(address, ledger.moves) : address;
-      let request = v2 ? byAddress.get(resolvedAddress) : ledger.requests[address];
+      let request = v2 ? requestAt(resolvedAddress) : ledger.requests[address];
+      // A keyed request names a slot; an answer holds only for the terms it answered.
+      const terms = requestKey !== null ? sha256(eventKey(content as unknown as Value) + JSON.stringify(nextForm)).slice(0, 16) : undefined;
+      if (request && terms !== undefined && request.terms !== undefined && request.terms !== terms) {
+        const wasOpen = request.reply === null;
+        if (wasOpen) close(request, { tag: "Cancelled" }, now);
+        byAddress.delete(resolvedAddress);
+        request.address = `${resolvedAddress}~${request.terms}`;
+        byAddress.set(request.address, request);
+        reached.add(request.id);
+        const previous = request;
+        request = undefined;
+        pendingSupersede = { id: previous.id, wasOpen };
+      }
 
       // In v2, if an answered `run` no longer fits the edited program's new form, surface it visibly and ask anew under a reform address.
       if (v2 && request && request.reply?.tag === "Answered" && request.verb === "run") {
@@ -1258,7 +1322,9 @@ export function* slices(code: Code, source: Ledger, now: number, options: PassOp
           form: nextForm,
           by: clampBy(instant(labels.by, now)), openedAt: now, reply: null, settledAt: null, detached: false,
           openedBy: options.openedBy ?? currentScope(), spawnOwner: currentSpawnOwner(),
+          ...(terms !== undefined ? { terms } : {}),
         };
+        if (pendingSupersede) { pass.superseded.push({ ...pendingSupersede, by: id }); pendingSupersede = null; }
         if (labels.about?.type === "request") {
           const parentReq = ledger.requests[labels.about.id];
           if (parentReq) {
