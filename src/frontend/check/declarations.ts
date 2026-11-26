@@ -144,7 +144,7 @@ export class TypeTable implements TypeFacts {
       this.qualifiedTypes.set(qname, info);
       // Also allow lookups by internal unqualified name (e.g. from library function return types) without exposing it as a user-visible unqualified type name unless opened.
       if (!this.qualifiedTypes.has(info.name)) this.qualifiedTypes.set(info.name, info);
-      if (info.opaque) this.types.set(qname, info);
+      this.types.set(qname, info);
     }
     if (!qualifiedOnly) {
       this.types.set(info.name, info);
@@ -248,7 +248,7 @@ export class TypeReader {
       });
       return UNREADABLE;
     }
-    const canonicalName = info.opaque && info.library ? `${info.library}.${info.name}` : info.name;
+    const canonicalName = canonicalTypeName(info);
     switch (info.kind) {
       case "source":
         // A request<'a> is waited on for a reply<'a>.
@@ -363,7 +363,7 @@ export function declareTypes(
     if (library) {
       const qname = `${library}.${decl.name}`;
       table.qualifiedTypes.set(qname, info);
-      if (decl.opaque) table.types.set(qname, info);
+      table.types.set(qname, info);
     }
     declared.push(info);
   }
@@ -502,3 +502,11 @@ export function spanOfName(span: A.Span, name: string): A.Span {
 }
 
 export { FACT, OCCURRENCE, REQUEST };
+
+/**
+ * The name a type has inside types: a library's types are named with their library, so a library's
+ * `report` is never the host's `report`, nor another library's.
+ */
+export function canonicalTypeName(info: { name: string; library?: string | null }): string {
+  return info.library && !info.name.includes(".") ? `${info.library}.${info.name}` : info.name;
+}

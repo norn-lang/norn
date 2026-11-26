@@ -15,7 +15,7 @@ import type * as A from "../ast.ts";
 import { STACK_EXHAUSTED, isStackExhausted } from "../diagnostics.ts";
 import { builtinModuleExports, t } from "./builtins.ts";
 import { REMOVED_CONSTRUCTORS, REMOVED_NAMES, removedLabel } from "./removed.ts";
-import { TypeReader, TypeTable, declareTypes, externalType, type CtorInfo, type TypeInfo } from "./declarations.ts";
+import { TypeReader, TypeTable, canonicalTypeName, declareTypes, externalType, type CtorInfo, type TypeInfo } from "./declarations.ts";
 import { both, closest, count, either, ordinal, sortDiagnostics, type CheckDiagnostic, type Code } from "./diagnostics.ts";
 import { effectsSummary, type EffectSummary } from "./effects.ts";
 import { validateActionAgainstManifests, validateEventKindAgainstManifests, type ConnectorManifest } from "./events.ts";
@@ -1198,7 +1198,7 @@ export class Checker {
           this.error("unknown-hold-type", `unknown type ${typeArg.value} in Holds.kind${near ? `; did you mean ${near}?` : ""}`, typeArg.span);
         } else if (info.params.length === 0 && info.kind !== "alias" && info.kind !== "source") {
           const res = resolve(shape.result);
-          if (res.tag === "con" && res.args[0]) unify(res.args[0], con(info.opaque && info.library ? `${info.library}.${info.name}` : info.name), this.table);
+          if (res.tag === "con" && res.args[0]) unify(res.args[0], con(canonicalTypeName(info)), this.table);
         }
       }
     }
@@ -1256,7 +1256,7 @@ export class Checker {
       return newVar(this.level);
     }
     const params = ctor.owner.params.map(() => newVar(this.level));
-    const type = con(ctor.owner.name, ...params);
+    const type = con(canonicalTypeName(ctor.owner), ...params);
     if (node.args.length !== ctor.args.length) {
       this.error("constructor-arity", constructorArity(ctor, node.args.length), node.span, { expected: String(ctor.args.length), found: String(node.args.length) });
       for (const arg of node.args) this.infer(arg);
@@ -1326,7 +1326,7 @@ export class Checker {
         info = this.table.recordWith(names);
         if (info !== null) {
           args = info.params.map(() => newVar(this.level));
-          const canonical = info.opaque && info.library ? `${info.library}.${info.name}` : info.name;
+          const canonical = canonicalTypeName(info);
           this.expect(type, con(canonical, ...args), node.spread.span, { where: "for the record before the fields" });
         } else {
           this.unknownFields(names, fields, node);
@@ -1366,7 +1366,7 @@ export class Checker {
         }
       }
       args = info === null ? [] : info.params.map(() => newVar(this.level));
-      const canonical = info === null ? null : (info.opaque && info.library ? `${info.library}.${info.name}` : info.name);
+      const canonical = info === null ? null : (canonicalTypeName(info));
       type = canonical === null ? newVar(this.level) : con(canonical, ...args);
     }
     for (const field of fields) {
@@ -1410,7 +1410,7 @@ export class Checker {
         const only = matching[0]!;
         info = only;
         args = only.params.map(() => newVar(this.level));
-        const canonical = only.opaque && only.library ? `${only.library}.${only.name}` : only.name;
+        const canonical = canonicalTypeName(only);
         this.expect(recordType, con(canonical, ...args), node.record.span, { where: `for the record whose field ${node.field} is read` });
       } else {
         const existing = shape.fields?.get(node.field);
@@ -1746,7 +1746,7 @@ export class Checker {
           return;
         }
         const params = ctor.owner.params.map(() => newVar(this.level));
-        this.patternType(type, con(ctor.owner.name, ...params), node);
+        this.patternType(type, con(canonicalTypeName(ctor.owner), ...params), node);
         if (node.args.length !== ctor.args.length) {
           this.patternErrors += 1;
           this.error("constructor-arity", constructorArity(ctor, node.args.length), node.span, { expected: String(ctor.args.length), found: String(node.args.length) });
@@ -1815,7 +1815,7 @@ export class Checker {
         return;
       }
       args = info.params.map(() => newVar(this.level));
-      this.patternType(type, con(info.name, ...args), node);
+      this.patternType(type, con(canonicalTypeName(info), ...args), node);
     }
     for (const field of node.fields) {
       const declared = info.fields.find((candidate) => candidate.name === field.name);
@@ -1906,7 +1906,7 @@ export class Checker {
           if (matching.length > 0) {
             const picked = matching.at(-1)!;
             const args = picked.params.map(() => newVar(0));
-            const canonical = picked.opaque && picked.library ? `${picked.library}.${picked.name}` : picked.name;
+            const canonical = canonicalTypeName(picked);
             this.expect(report, con(canonical, ...args), node.span, { where: "for the report of this run" });
           } else {
             defaulted = true;
@@ -1951,7 +1951,7 @@ export class Checker {
           if (matching.length > 0) {
             const picked = matching.at(-1)!;
             const args = picked.params.map(() => newVar(0));
-            const canonical = picked.opaque && picked.library ? `${picked.library}.${picked.name}` : picked.name;
+            const canonical = canonicalTypeName(picked);
             this.expect(site.report, con(canonical, ...args), site.node.span, { where: "for the report at this call site" });
           } else {
             unify(site.report, con("report"), this.table);
