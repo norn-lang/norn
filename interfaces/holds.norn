@@ -1,0 +1,35 @@
+// Standard Capability Interface: Holds
+//
+// What holds now, for each thing that has it: a Page's facts, a machine's
+// state, a connector's grant. Events say what happened; Holds says what is so.
+// Hosts implement it without putting any app names or business words into the
+// host interface. A Space names its kinds of facts as types in its libraries.
+//
+// A program never reads what holds directly. It samples it: the value is read
+// once in the scope that asks and recorded in the ledger, so every later pass
+// of that scope reads the same value, a round at work is never changed under
+// it, and the next round reads what holds then.
+
+// A kind of thing that holds, by where it comes from and the type it has:
+// Holds.kind("page", "Products.Site"). The checker reads the type by name.
+type kind<'a>
+
+// What holds for one thing of a kind, by the thing's id.
+type held<'a>
+
+// One thing starting (present) or stopping (not present) to have a kind.
+type member = { id: string, present: bool }
+
+external kind: (string, string) => kind<'a>
+external held: (kind<'a>, string) => held<'a>
+
+// The things that have the kind: the whole set when a loop begins, then each
+// thing as it starts or stops having it. A changed value is not a member change.
+external members: (kind<'a>) => stream<member>
+
+// Each new value the thing has, and None when it stops having one. A value the
+// host holds quietly (a program's own write-back) occurs on no stream.
+external changes: (held<'a>) => stream<option<'a>>
+
+// What holds for the thing now, read once in this scope and recorded.
+external sample: (held<'a>) => option<'a>

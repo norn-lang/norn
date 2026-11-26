@@ -1188,6 +1188,20 @@ export class Checker {
         this.eventKindCalls.push({ app: appArg.value, kind: kindArg.value, payload, span: node.span });
       }
     }
+    if (callee.binding?.library === "Holds" && callee.binding.name === "kind" && first === null) {
+      // The second argument names the type of what holds: the checker reads it as written in a type annotation.
+      const [, typeArg] = positional;
+      if (typeArg?.kind === "StringLiteral") {
+        const info = this.table.lookupType(typeArg.value);
+        if (info === undefined) {
+          const near = closest(typeArg.value, [...this.table.types.keys(), ...this.table.qualifiedTypes.keys()]);
+          this.error("unknown-hold-type", `unknown type ${typeArg.value} in Holds.kind${near ? `; did you mean ${near}?` : ""}`, typeArg.span);
+        } else if (info.params.length === 0 && info.kind !== "alias" && info.kind !== "source") {
+          const res = resolve(shape.result);
+          if (res.tag === "con" && res.args[0]) unify(res.args[0], con(info.opaque && info.library ? `${info.library}.${info.name}` : info.name), this.table);
+        }
+      }
+    }
     if (callee.binding?.library === "Actions" && callee.binding.name === "action" && first === null) {
       const [appArg, nameArg] = positional;
       if (appArg?.kind === "StringLiteral" && nameArg?.kind === "StringLiteral") {

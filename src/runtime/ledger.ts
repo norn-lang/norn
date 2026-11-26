@@ -29,6 +29,8 @@ export interface LedgerRequest {
    * this request is superseded and a new one is opened.
    */
   terms?: string;
+  /** The scope path the request was asked in (`root`, or a loop, round and spawn path): its branch, for hosts that group by it. */
+  scope?: string;
   verb: string;
   holder: string;
   /** For a request offered to a group with `anyOf`: who may take it. Null once taken, and for a request to one participant. */
@@ -117,6 +119,12 @@ export interface Ledger {
   entries: Record<string, Entry>;
   /** Facts hold once and stay true. */
   facts: Record<string, { at: number; value: Value }>;
+  /**
+   * What holds now, by `Holds.kind` and the id of what it holds for
+   * (`interfaces/holds.norn`). The host keeps it current with `hold`; a
+   * program reads it only through `Holds.sample`, which records what it read.
+   */
+  holds?: Record<string, Record<string, { at: number; value: Value }>>;
   /** Stream occurrences in the order the ledger recorded them; a wait takes the first one after its own beginning. */
   occurrences: { key: string; at: number; value: Value }[];
   /** Answers that settled nothing: late, from a former holder, or outside the request's form. */
@@ -306,6 +314,10 @@ export interface Pass {
   superseded: { id: string; by: string; wasOpen: boolean }[];
   /** On a ledger without `uniqueAddresses`: addresses a pass reached more than once, still numbered so the program goes on. */
   duplicateAddresses: string[];
+  /** The rounds a `~per` loop keeps going, one per partition: the scope each runs in and its partition key. */
+  branches: { loop: string; scope: string; partition: string }[];
+  /** The `Holds` kinds this pass sampled or listens to the members of: the host sends changes of these kinds only. */
+  holding: string[];
   /** Answers rejected by an `accepting` request validator during this pass. */
   validationErrors?: { id: string; reason: string; errors: FormPathError[] }[];
   /** All request IDs (open or answered) reached by this pass. */
@@ -666,6 +678,45 @@ export function occur(ledger: Ledger, stream: Value, value: Value, now: number):
   ledger.occurrences.push({ key: external(stream, "stream", "occur"), at: now, value });
 }
 
+/** `Holds.kind(source, type)` as the runtime keeps it. */
+export const holdKind = (source: string, type: string): Value => variant("HoldKind", text(source), text(type));
+/** The key the ledger keeps a `Holds.kind` under. */
+export const holdKindKey = (kind: Value): string => {
+  if (kind.type !== "variant" || kind.name !== "HoldKind" || kind.args[0]?.type !== "string" || kind.args[1]?.type !== "string") {
+    throw new Error("Expected a Holds.kind value");
+  }
+  return `${kind.args[0].value}:${kind.args[1].value}`;
+};
+const membersStream = (kind: Value): Value => ({ type: "source", kind: "stream", name: "Holds.members", args: [kind], labels: {} });
+const changesStream = (kind: Value, id: string): Value =>
+  ({ type: "source", kind: "stream", name: "Holds.changes", args: [variant("Held", kind, text(id))], labels: {} });
+const member = (id: string, present: boolean): Value => ({ type: "record", fields: { id: text(id), present: { type: "bool", value: present } } });
+
+/**
+ * The host says what holds now for `id` under `kind` (spec §6.4): a value, or
+ * `null` when nothing does any more. A thing that starts or stops having the
+ * kind occurs on `Holds.members(kind)`; a changed value occurs on
+ * `Holds.changes`, unless `notify` is false, as for a value the program's own
+ * work wrote back: the next `Holds.sample` reads it, and nothing is woken.
+ * Holding the same value again records nothing.
+ */
+export function hold(ledger: Ledger, kind: Value, id: string, value: Value | null, now: number, options: { notify?: boolean } = {}): void {
+  const key = holdKindKey(kind);
+  const held = (ledger.holds ??= {})[key] ??= {};
+  const before = held[id];
+  if (value === null) {
+    if (!before) return;
+    delete held[id];
+    ledger.occurrences.push({ key: eventKey(membersStream(kind)), at: now, value: member(id, false) });
+    if (options.notify !== false) ledger.occurrences.push({ key: eventKey(changesStream(kind, id)), at: now, value: variant("None") });
+    return;
+  }
+  if (before && equal(before.value, value)) return;
+  held[id] = { at: now, value };
+  if (!before) ledger.occurrences.push({ key: eventKey(membersStream(kind)), at: now, value: member(id, true) });
+  if (options.notify !== false) ledger.occurrences.push({ key: eventKey(changesStream(kind, id)), at: now, value: variant("Some", value) });
+}
+
 /** Streams the language makes from others, or from the clock: nothing occurs on one of these by a host's word. */
 const COMPOSED = ["or", "merge", "never", "after", "every", "map", "filter", "filterMap", "scan", "timed", "gather", "taken", "notes"];
 /** The host's streams under a stream a program composed, in the order `or`/`merge` gives them. */
@@ -932,7 +983,7 @@ function resolveAddress(address: string, moves: readonly MovedAddress[] | undefi
 export function* slices(code: Code, source: Ledger, now: number, options: PassOptions = {}): Generator<undefined, Pass> {
   const pass: Pass = {
     status: "waiting", result: null, error: null, log: [], opened: [], unreached: [], cancelled: [],
-    rescheduled: [], formChanged: [], incompatibleAnswers: [], superseded: [], duplicateAddresses: [], reached: [], loops: [], said: [],
+    rescheduled: [], formChanged: [], incompatibleAnswers: [], superseded: [], duplicateAddresses: [], branches: [], holding: [], reached: [], loops: [], said: [],
     waiting: null, listening: [], nextDue: null,
   };
   if (source.ended) return { ...pass, status: source.ended.status, result: source.ended.result, error: source.ended.error };
@@ -1214,7 +1265,7 @@ export function* slices(code: Code, source: Ledger, now: number, options: PassOp
           about: labels.about ? show(labels.about) : null, context: action.input === null ? null : show(action.input),
           options: null, form: null, action,
           by: clampBy(instant(labels.by, now)), openedAt: now, reply: null, settledAt: null, detached: false,
-          openedBy: options.openedBy ?? currentScope(), spawnOwner: currentSpawnOwner(),
+          openedBy: options.openedBy ?? currentScope(), spawnOwner: currentSpawnOwner(), ...(v2 ? { scope: currentScope() } : {}),
         };
         if (v2) byAddress.set(resolvedAddress, request);
         log.push({ kind: "opened", request: { ...request } });
@@ -1286,7 +1337,7 @@ export function* slices(code: Code, source: Ledger, now: number, options: PassOp
               options: choices?.type === "list" ? choices.values : null,
               form: nextForm,
               by: clampBy(instant(labels.by, now)), openedAt: now, reply: null, settledAt: null, detached: false,
-              openedBy: options.openedBy ?? currentScope(), spawnOwner: currentSpawnOwner(),
+              openedBy: options.openedBy ?? currentScope(), spawnOwner: currentSpawnOwner(), ...(v2 ? { scope: currentScope() } : {}),
             };
             if (labels.about?.type === "request") {
               const parentReq = ledger.requests[labels.about.id];
@@ -1321,7 +1372,7 @@ export function* slices(code: Code, source: Ledger, now: number, options: PassOp
           options: choices?.type === "list" ? choices.values : null,
           form: nextForm,
           by: clampBy(instant(labels.by, now)), openedAt: now, reply: null, settledAt: null, detached: false,
-          openedBy: options.openedBy ?? currentScope(), spawnOwner: currentSpawnOwner(),
+          openedBy: options.openedBy ?? currentScope(), spawnOwner: currentSpawnOwner(), ...(v2 ? { scope: currentScope() } : {}),
           ...(terms !== undefined ? { terms } : {}),
         };
         if (pendingSupersede) { pass.superseded.push({ ...pendingSupersede, by: id }); pendingSupersede = null; }
@@ -1375,10 +1426,17 @@ export function* slices(code: Code, source: Ledger, now: number, options: PassOp
         displayKey = frame.displayKey;
       }
 
+      // A loop over `Holds.members` sees the whole held set, not only what changes after it began.
+      const heldSets = hostStreams(args[0]!).filter(source => source.name === "Holds.members");
+      for (const source of heldSets) {
+        const kindKey = holdKindKey(source.args[0]!);
+        if (!pass.holding.includes(kindKey)) pass.holding.push(kindKey);
+      }
       const rawEntry = entry(storageKey, () => ({
         at: now,
         value: {
-          startedAt: now, from: ledger.occurrences.length, streams: {}, lastTimerAt: null,
+          startedAt: now, from: ledger.occurrences.length,
+          streams: Object.fromEntries(heldSets.map(source => [eventKey(source as unknown as Value), 0])), lastTimerAt: null,
           timerSpec: null, sealedRounds: 0, sealedTimerInstants: [], active: null,
         } as unknown as Json,
       }));
@@ -1462,6 +1520,30 @@ export function* slices(code: Code, source: Ledger, now: number, options: PassOp
         }
         saveScanStates(storageKey, scanStates);
 
+        // Under `~per`, a partition keeps one round: a newer occurrence in it takes the place of the round before,
+        // and whatever that round left open is cancelled. Other partitions go on untouched.
+        if (effect.perKey) {
+          const latest = new Map<string, number>();
+          activeRounds.forEach((round, index) => { if (round.partKey !== undefined) latest.set(round.partKey, index); });
+          const inFlight = new Set((state.activeRounds ?? []).map(round => round.roundKey));
+          for (let index = activeRounds.length - 1; index >= 0; index--) {
+            const round = activeRounds[index]!;
+            if (round.partKey === undefined || latest.get(round.partKey) === index) continue;
+            activeRounds.splice(index, 1);
+            if (!inFlight.has(round.roundKey)) continue;
+            // Requests of the round itself, and of loops and spawns nested in it, whose scope path runs through it.
+            const roundScope = `${displayKey}/round:${round.roundKey}`;
+            for (const req of Object.values(ledger.requests)) {
+              const at = req.scope ?? (req.address ?? req.id).replace(/^request:/u, "");
+              if (req.reply === null && (at === roundScope || at.startsWith(`${roundScope}/`) || at.includes(`${roundScope}/`))) {
+                close(req, { tag: "Cancelled" }, now);
+                if (req.verb === "spawn") cancelSpawnChildren(req.id);
+              }
+            }
+            state.sealedRounds += 1;
+          }
+        }
+
         const stillOpenRounds: typeof activeRounds = [];
         for (const round of activeRounds) {
           const prevMachine = activeMachine;
@@ -1492,6 +1574,11 @@ export function* slices(code: Code, source: Ledger, now: number, options: PassOp
           }
         }
         state.activeRounds = stillOpenRounds;
+        if (effect.perKey) {
+          for (const round of stillOpenRounds) {
+            if (round.partKey !== undefined) pass.branches.push({ loop: displayKey, scope: `${displayKey}/round:${round.roundKey}`, partition: round.partKey });
+          }
+        }
         if (!state.waitingLogged) {
           log.push({ kind: "waiting", targets, until: null });
           state.waitingLogged = true;
@@ -1965,6 +2052,21 @@ export function* slices(code: Code, source: Ledger, now: number, options: PassOp
         log.push({ kind: "said", to, text: body });
       }
       return { value: unit, at: entry(key, () => ({ at: now, value: null })).at };
+    }
+    if (name === "Holds.sample") {
+      const target = args[0];
+      if (args.length !== 1 || target?.type !== "variant" || target.name !== "Held" || target.args[1]?.type !== "string") {
+        throw new ProgramError("Holds.sample needs a Holds.held value");
+      }
+      const kindKey = holdKindKey(target.args[0]!), id = target.args[1].value;
+      if (!pass.holding.includes(kindKey)) pass.holding.push(kindKey);
+      // Read once in this scope and recorded: a later pass of the same scope reads what this one read.
+      const key = `sample:${currentScope()}/${kindKey}/${id}`;
+      const read = entry(key, () => {
+        const now_ = ledger.holds?.[kindKey]?.[id];
+        return { at: now, value: (now_ ? variant("Some", now_.value) : variant("None")) as unknown as Json };
+      });
+      return { value: read.value as unknown as Value, at: read.at };
     }
     if (name === "status") {
       if (args.length !== 1) throw new ProgramError("status needs one request");

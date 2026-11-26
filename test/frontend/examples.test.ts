@@ -25,9 +25,10 @@ test("the examples, the standard library and the reference host interface exist"
   ]);
 });
 
-test("the reference host interface needs norn-ast version 2; the programs need only version 1", () => {
+test("the reference host interface needs norn-ast version 2, the standard library version 3, and the examples only version 1", () => {
+  // The standard library names a standard capability interface (Std.each on Holds), and qualified names are version 3.
   for (const path of programs) {
-    assert.equal(astVersion(parseOk(read(path))), path.startsWith("hosts/") ? 2 : 1, path);
+    assert.equal(astVersion(parseOk(read(path))), path.startsWith("hosts/") ? 2 : path.startsWith("std/") ? 3 : 1, path);
   }
 });
 

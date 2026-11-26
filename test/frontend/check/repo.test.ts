@@ -24,7 +24,7 @@ for (const path of [...norn("examples"), "std/std.norn"]) {
 
 test("every norn block in the spec type-checks", () => {
   const blocks = codeBlocks(read("docs/spec.md"), "norn");
-  assert.equal(blocks.length, 7);
+  assert.equal(blocks.length, 8);
   blocks.forEach((block, index) => {
     const result = check(block);
     assert.deepEqual(result.diagnostics, [], `block ${index + 1}:\n${block}\n${describe(result.diagnostics)}`);
@@ -87,5 +87,6 @@ test("the standard library's types", () => {
     "quorumLoop: (list<request<'a>>, int, list<'a>) => list<'a>",
     "quorum: (list<request<'a>>, ~needed: int) => list<'a>",
     "orEither: (stream<'a>, stream<'b>) => stream<either<'a, 'b>>",
+    "each: (Holds.kind<'a>, (Holds.held<'a>) => unit, ~key: string=?) => 'b",
   ]);
 });

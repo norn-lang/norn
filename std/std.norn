@@ -106,3 +106,11 @@ let quorum = (requests, ~needed) => quorumLoop(requests, needed, [])
 
 // Heterogeneous stream alternation returning `stream<either<'a, 'b>>` (alias for `or`, alongside homogeneous `merge`).
 let orEither = (a, b) => or(a, b)
+
+// One branch for each thing that has a `kind`, for as long as it has it. A branch begins when the thing
+// starts having the kind and ends, cancelling what it left open, when it stops; the other branches go on.
+// `branch` gets what holds for its thing and reads it with `Holds.sample`, so a changed value reaches the
+// branch's next round without interrupting the one at work.
+let each = (~key="each", kind, branch) =>
+  Holds.members(kind)->forEach(~key, ~each=Together, ~per=m => m.id, m =>
+    if m.present { branch(Holds.held(kind, m.id)) } else { () })
