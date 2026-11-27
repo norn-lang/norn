@@ -57,6 +57,9 @@ can act on.
   - `result<'a, 'e> = Ok('a) | Error('e)`;
   - `reply<'a> = Answered('a) | Refused(string) | NoReply | Broke(string) | Cancelled | Revoked`;
   - `yesno = Yes | No`;
+  - `standing<'a> = AnswerWith('a) | Decline(string) | Delegate(participant) | Mine`,
+    what a standing policy decides about a request asked of its participant
+    (spec §7);
   - `either<'a, 'b> = First('a) | Second('b)`.
 - **Sources.** `event<'a>`, `stream<'a>` and `request<'a>` are one internal
   type, `source<'kind, 'w>`, with three kinds: fact, occurrence and request.

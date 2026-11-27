@@ -631,6 +631,48 @@ export function evaluateAdmissionPolicy(policyCode: Code, request: LedgerRequest
   throw new Error(`Admission policy returned invalid value: ${show(verdict)}`);
 }
 
+/** What a participant's standing policy decides about one request asked of them (spec §7). */
+export type StandingDecision =
+  | { decision: "AnswerWith"; value: Value }
+  | { decision: "Decline"; reason: string }
+  | { decision: "Delegate"; participant: string }
+  | { decision: "Mine" };
+
+/**
+ * Evaluates a participant's standing policy, a pure Norn function
+ * `asked => AnswerWith(x) | Decline(why) | Delegate(participant) | Mine`, on what
+ * one request asked of them is about. It reads nothing but `asked` and keeps
+ * no state, so the same request is always decided the same way.
+ *
+ * A host calls it when a request reaches a participant whose policy that
+ * participant admitted in person (spec §10), and carries the decision out as
+ * the participant's own move: `AnswerWith` and `Decline` settle the request for
+ * them, `Delegate` is a delegation (spec §7), `Mine` leaves the request where
+ * it is. The host checks an `AnswerWith` against the request's form as it checks
+ * any answer. A policy that throws, or decides something else, decides
+ * nothing: the caller leaves the request with the participant.
+ */
+export function evaluateStandingPolicy(policyCode: Code, asked: Value, now: number): StandingDecision {
+  const machine = start(policyCode, now);
+  advance(policyCode, machine, 100_000);
+  if (machine.control.kind !== "done") {
+    throw new Error(machine.control.kind === "error" ? machine.control.message : "A standing policy must evaluate purely to a function");
+  }
+  const fn = machine.control.value;
+  if (fn.type !== "closure" && fn.type !== "builtin") throw new Error("A standing policy must evaluate to a function");
+  const verdict = runPure(policyCode, fn, asked, machine, now);
+  if (verdict.type === "variant") {
+    const [first] = verdict.args;
+    if (verdict.name === "AnswerWith" && verdict.args.length === 1) return { decision: "AnswerWith", value: first! };
+    if (verdict.name === "Decline" && verdict.args.length === 1 && first!.type === "string") return { decision: "Decline", reason: first!.value };
+    if (verdict.name === "Delegate" && verdict.args.length === 1 && first!.type === "participant") {
+      return { decision: "Delegate", participant: show(first!) };
+    }
+    if (verdict.name === "Mine" && verdict.args.length === 0) return { decision: "Mine" };
+  }
+  throw new Error(`A standing policy decided ${show(verdict)}, which is not AnswerWith, Decline, Delegate or Mine`);
+}
+
 function conditionsOf(who: Value | undefined): Record<string, string> {
   if (who?.type !== "participant" || who.name === "anyOf") return {};
   return Object.fromEntries(Object.entries(who.labels).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([label, value]) => [label, show(value)]));

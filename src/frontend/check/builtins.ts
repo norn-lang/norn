@@ -64,6 +64,9 @@ export function builtinTable(): TypeTable {
   variant("either", ["a", "b"], [["First", [a]], ["Second", [param(1, "b")]]]);
   variant("eachStrategy", [], [["Queue", []], ["Latest", []], ["Restart", []], ["Together", []], ["Batch", []]]);
   variant("admission", [], [["Allow", []], ["Deny", [t.string]], ["AlsoAsk", [t.participant]]]);
+  // What a participant's standing policy decides about a request asked of them (spec §7): answer it, decline it,
+  // have one participant answer for them, or leave it to themselves.
+  variant("standing", ["a"], [["AnswerWith", [a]], ["Decline", [t.string]], ["Delegate", [t.participant]], ["Mine", []]]);
   const timedRecord = typeInfo({
     name: "timedValue",
     kind: "record",

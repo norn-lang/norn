@@ -107,6 +107,7 @@ export const CODES = {
   "unknown-event-kind": "Events.kind names an app or event kind that is not in the connector manifest",
   "unknown-action": "Actions.action names an app or action that is not in the connector manifest",
   "unknown-hold-type": "Holds.kind names a type that is not declared or exported where the program can see it",
+  "standing-policy": "a standing policy does not bind `policy` to a function, or has an effect",
   "manifest-field-mismatch": "a payload type does not fit the fields its connector manifest declares",
   "missing-row-field": "a record does not contain a field required by a row constraint",
   "default-report-form": "a run's report type was not constrained and defaulted to the host report",

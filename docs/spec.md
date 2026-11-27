@@ -5,7 +5,9 @@
 > clarity: see [Changes from the first draft](#15-changes-from-the-first-draft).
 > The durable state became a ledger of requests instead of a stored program
 > state: see [The ledger](#16-the-ledger-2026-11-11). Whoever holds a request
-> can delegate it: see [Delegation](#17-delegation-2026-11-15). A local reference
+> can delegate it: see [Delegation](#17-delegation-2026-11-15), and can say ahead
+> of time what becomes of a kind of request: see
+> [Standing policies](#19-standing-policies-2026-11-27). A local reference
 > implementation (a parser, an evaluator over the ledger and a simulated
 > team) runs the five §3 examples from source
 > ([reference runtime](reference-runtime.md)). [xMatrix](https://xmatrix.page) is the
@@ -521,6 +523,50 @@ a Page section or a message.
     (§10). The judge's judgements are not delegated.
   - The program stays in charge: its `handOver` or `cancel` ends a delegation,
     and the request's deadline passes as it would have.
+- **The participant being asked can decide ahead of time.** A *standing
+  policy* says what becomes of a kind of request whenever one is asked of
+  its participant, with nobody there:
+
+  ```norn
+  type secretUse = {secret: string, conversation: string}
+  let policy = (r: secretUse) =>
+    if r.conversation == "patrol" && r.secret == "database-read" { AnswerWith(Yes) }
+    else if r.secret == "database-migrate" { Mine }
+    else { Delegate(@auditor) }
+  ```
+
+  - It is a program that binds `policy` to a function from what the request
+    is about to a `standing<'a>`. The host supplies the record type as
+    `asked`; the example writes it out to be read on its own:
+
+    | The policy decides | What the host does, as the participant's own move |
+    |---|---|
+    | `AnswerWith(x)` | answers the request with `x`, as its participant |
+    | `Decline(why)` | refuses it, as its participant |
+    | `Delegate(who)` | delegates it to `who`, under the rules above: `who` answers it or gives it back |
+    | `Mine` | nothing: the request waits for its participant, as without a policy |
+
+  - **A policy has no effect.** It asks nobody, says nothing and waits for
+    nothing, and it reads only what the request is about. The same request is
+    therefore decided the same way every time, a policy can be shown what it
+    would decide before it is admitted, and words in a request cannot move a
+    policy that does not read them. Where a judgement is wanted, the policy
+    names who makes it with `Delegate`, and that participant answers as a
+    delegate does.
+  - **A host says which kinds of request a policy may decide**, each by two
+    types: the record such a request is about, which the policy sees as
+    `asked`, and what answers it. The checker checks the policy against
+    them, so a policy cannot answer a yes-or-no with text or read a field
+    the kind does not have, and it decides every request of the kind.
+  - **The request does not change.** The program that asked sees a reply, and
+    a reply carries no name. The ledger records who answered and for whom, as
+    it does for a delegate: here, that the participant's policy did.
+  - **A policy that cannot decide decides nothing.** One that fails, or whose
+    answer does not fit the request, leaves the request with its participant.
+    A request is never lost to a policy.
+  - A policy stands for its participant only (§10). It is not a way for a
+    program to answer its own requests, and it gives nobody the participant's
+    other authority.
 - **Shared functions live in a standard library** written in Norn and opened
   with `open Std`.
 
@@ -636,6 +682,13 @@ program makes. §11.2 gives the rules for changing a program while it runs.
 - **Admitting is not granting.** A prepared action stands for one action with
   one input, performed once. It gives the program nothing else in that app,
   and it stops being good when what was admitted changes (§6.3).
+- **A standing policy is consent formed ahead of time.** It answers for one
+  participant, so only that participant admits it, in person, and every
+  change to its text is admitted again. An agent that edits a policy, or
+  writes one as its owner, has proposed it: the host runs the text the
+  participant admitted and no other. A policy is withdrawn at once, and a
+  participant who may no longer answer a kind of request has no policy for
+  it: authority is current here as everywhere.
 - **Delegating is not granting.** A delegate gives the request's answer and
   nothing else: they act with none of the delegator's other authority, and
   the program still performs every effect as its author.
@@ -1006,10 +1059,11 @@ from projection.
    - Time literals.
    - `?` on nested replies.
    - Which `forEach` policy is the default.
-6. **Standing delegation.** Whether a participant can delegate a kind of
-   request in advance, such as every `confirm` about clearing expired data,
-   whether a delegate may delegate again, and whether a program needs a way to
-   say that one request must be answered by the participant it asks.
+6. **Standing delegation.** Answered in part by standing policies (§7, §19):
+   a participant decides a kind of request ahead of time. Still open:
+   whether a delegate may delegate again, and whether a program needs a way
+   to say that one request must be answered by the participant it asks, in
+   person, whatever their policy says.
 
 ## 14. Non-goals
 
@@ -1113,3 +1167,37 @@ however often the program is evaluated, edited or upgraded. Programs stay
 pure: `Actions.action` computes a name, and the two effects are requests the
 ledger records. The checker treats them as effects, so a pure callback cannot
 make one, and as requests, so neither can be dropped.
+
+## 19. Standing policies (2026-11-27)
+
+A check of a production database ran every three days, at night. Each run
+needed a secret that a person had to approve at that moment, and nobody was
+awake: the approval timed out and the check went without its data. The
+approval was a request asked of a person, and the only moves they had were
+made one request at a time (§17).
+
+| Before | Now | Why |
+|---|---|---|
+| The participant asked could answer, refuse or delegate a request once it had reached them | A standing policy decides a kind of request ahead of time: answer it, decline it, delegate it, or leave it (§7) | "Who answers for me is mine" (§17) should not need me to be there. A person approves a kind of thing once, as they approve a week of posts in one sitting (§18) |
+| Open question 6 asked whether a kind of request could be delegated in advance | A policy's `Delegate(who)` is that, and it is one of four decisions | Delegating everything is rarely wanted: some requests are safe to answer, some need another's judgement, and some stay with the person |
+| A host's approvals were its own cards, each with its own rules | An approval a host asks of a participant is a request, and a policy decides it like any other | One way to be asked, so one way to say ahead of time what the answer is |
+
+**Why a pure function and not a program that waits for requests.** A program
+that listened for requests and answered them would be Norn as it is: a
+stream, a loop, an effect that answers. It would also hold state, could miss
+a request or answer one twice, and could be told things: a model deciding
+inside it reads the asker's reason, and the asker wrote it. A function of
+what the request is about has none of that. It is the same shape as the
+admission policy a host evaluates before it dispatches a request, turned
+around: that one decides about requests a program makes, this one about
+requests a participant is asked.
+
+**What it leaves sound.** A policy adds one built-in type and no effect. A
+request decided by a policy has one holder and ends with one reply, as
+before, and the program that asked cannot tell. `Delegate` is delegation,
+with its rules: once, to one participant, never to one the request leaves
+out. A policy never widens what its participant may do, because the host
+carries each decision out as that participant's move and admits it as it
+would admit the move made by hand. And a person is still never necessary and
+never bypassed: no policy means every request waits for its participant, and
+`Mine` says so for the ones that should.

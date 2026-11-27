@@ -24,7 +24,7 @@ for (const path of [...norn("examples"), "std/std.norn"]) {
 
 test("every norn block in the spec type-checks", () => {
   const blocks = codeBlocks(read("docs/spec.md"), "norn");
-  assert.equal(blocks.length, 8);
+  assert.equal(blocks.length, 9);
   blocks.forEach((block, index) => {
     const result = check(block);
     assert.deepEqual(result.diagnostics, [], `block ${index + 1}:\n${block}\n${describe(result.diagnostics)}`);

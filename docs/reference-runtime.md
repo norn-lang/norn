@@ -126,6 +126,15 @@ cap.
   taken back is appended to `ledger.delegations`, with its reason. `handOver`
   ends a delegation. A ledger written before delegation existed lacks these
   fields and is read as one in which nobody delegated anything.
+- `evaluateStandingPolicy(code, asked, now)` decides one request asked of a
+  participant with that participant's standing policy (spec §7): `AnswerWith`
+  with its value, `Decline` with its reason, `Delegate` with the participant,
+  or `Mine`. It reads no ledger and writes none; the host carries the
+  decision out with `settle` or `delegate`, as the participant's own move.
+  `checkStandingPolicy(text, {asked, answer}, options)` checks a policy's
+  text against a kind of request, and `standingPolicySource` gives the
+  program to compile. A policy that throws, or decides anything else, makes
+  `evaluateStandingPolicy` throw: the host leaves the request where it is.
 - `establish` records a fact, which then holds; `occur` records one stream
   occurrence. Both refuse timers, `never()` and compositions. A wait on a fact
   that already holds ends at once. A wait on a stream takes the first
