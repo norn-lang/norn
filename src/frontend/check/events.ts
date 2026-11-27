@@ -35,6 +35,18 @@ external perform: (prepared<'o>, ~by: 'd=?) => request<'o>
 external read: (action<'i, 'o>, 'i, ~by: 'd=?, ~about: 'c=?) => request<'o>
 `;
 
+/** Canonical `interfaces/admission.norn` definition (embedded for browser safety). */
+export const ADMISSION_INTERFACE_SOURCE = `// Standard Capability Interface: Admission
+type work = { program: string, digest: string }
+type request = {
+  what: string,
+  target: string,
+  place: string,
+  owner: string,
+  work: option<work>,
+}
+`;
+
 export interface ConnectorFieldSpec {
   name: string;
   type: "string" | "int" | "float" | "bool" | "time" | "json" | "list<string>" | "list<json>" | string;

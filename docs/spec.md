@@ -5,7 +5,8 @@
 > clarity: see [Changes from the first draft](#15-changes-from-the-first-draft).
 > The durable state became a ledger of requests instead of a stored program
 > state: see [The ledger](#16-the-ledger-2026-11-11). Whoever holds a request
-> can delegate it: see [Delegation](#17-delegation-2026-11-15). A local reference
+> can delegate it: see [Delegation](#17-delegation-2026-11-15). A host admits
+> some things under a policy: see [Admission](#101-admission). A local reference
 > implementation (a parser, an evaluator over the ledger and a simulated
 > team) runs the five §3 examples from source
 > ([reference runtime](reference-runtime.md)). [xMatrix](https://xmatrix.page) is the
@@ -662,6 +663,58 @@ program makes. §11.2 gives the rules for changing a program while it runs.
 - **Defaults that spend money, contact outsiders, or cannot be undone** must
   say so: amount and scope go into the program text, where reviewers and
   tools can see them.
+
+### 10.1 Admission
+
+Some things a host lets happen only under a rule its people set: a secret
+that asks first, an action that wants a second approval. A person there every
+time is one way to keep such a rule. An *admission policy* is the other: the
+rule, written once, that the host reads each time.
+
+```norn
+let admit = (req: Admission.request) =>
+  switch req.work {
+  | Some(w) if req.what == "secret.use" && req.target == "database-read"
+      && w.program == "page-1/patrol" => Allow
+  | _ => AlsoAsk(@alice)
+  }
+```
+
+- **A policy is a function from what is about to be admitted to an
+  `admission`**: `Allow`, `Deny(why)` or `AlsoAsk(participant)`.
+
+  | The policy answers | The host |
+  |---|---|
+  | `Allow` | admits it, with nobody asked |
+  | `Deny(why)` | refuses it, and says why |
+  | `AlsoAsk(who)` | admits it only once it has asked, in its own way |
+
+- **It has no effect.** It asks nobody, says nothing and waits for nothing,
+  so the same thing is always decided the same way, and a policy can be read
+  and tried before it is in force. The checker finds an effect in a policy
+  before it runs, and the evaluator refuses one that would perform it.
+- **`Admission` is the standard capability a host hands it** (`interfaces/
+  admission.norn`): `what` kind of thing, its `target`, the `place` it is
+  asked from, the `owner` whose authority the asker runs under, and the
+  `work` the asker is on, a program's request, when it is on one. The fields
+  name no host and no app; a secret, a connector, a deploy are values of
+  `what`. A host hands the record over as a value, never as text.
+- **`work` carries a digest of the program's text.** A policy that compares
+  it admits a program only while its text is the one somebody read; one that
+  does not, admits whatever the program says now.
+- **A policy is not asked and holds nothing.** Only people and agents answer
+  requests (§7). The host evaluates a policy; when the policy says
+  `AlsoAsk`, the host asks a participant, and that is the request.
+- **Who may put a policy in force is the host's to say**, and it is never the
+  program being admitted. A policy that opens something up is a decision
+  about that thing, made by whoever may make it.
+- **A policy that cannot decide decides nothing.** One that fails, does not
+  stop, or answers something else leaves the host to admit as it would with
+  no policy.
+
+A host may also evaluate a policy on a program's own requests before it
+dispatches them, handing it that request's fields. No host does yet, and what
+`AlsoAsk` means there is not specified here.
 
 ## 11. Runtime protocol (from the [runtime research](research/runtime.md))
 

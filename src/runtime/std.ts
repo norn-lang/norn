@@ -207,7 +207,7 @@ function collectAllNames(roots: unknown[]): Set<string> {
   return names;
 }
 
-const BUILTIN_MODULES = new Set(["String", "List", "Option", "Result", "JSON", "Events", "Actions", "Holds"]);
+const BUILTIN_MODULES = new Set(["String", "List", "Option", "Result", "JSON", "Events", "Actions", "Holds", "Admission"]);
 
 function collectModuleRefs(program: Program): Set<string> {
   const modules = new Set<string>();

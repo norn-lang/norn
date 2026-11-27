@@ -1,0 +1,28 @@
+// Standard Capability Interface: Admission
+//
+// A host admits some things only under a rule its people set: a secret that
+// asks first, an action that needs a second approval. The rule is an
+// admission policy, a pure function from what is about to be admitted to
+// `Allow`, `Deny(why)` or `AlsoAsk(participant)` (spec §10.1). This interface
+// is what a host hands such a policy. Hosts fill it without putting any app
+// names or business words into the interface: what kind of thing it is, is
+// data.
+
+// The program request the asker is working on now: the host's name for the
+// program, and a digest of the program's current text. A policy that compares
+// the digest admits the program only while its text is the one somebody read.
+type work = { program: string, digest: string }
+
+// What a host is about to admit.
+type request = {
+  // The kind of thing, in the host's words, as in "secret.use".
+  what: string,
+  // What it is done to.
+  target: string,
+  // Where it is asked from.
+  place: string,
+  // Whose authority the asker runs under.
+  owner: string,
+  // None when the asker is working on no program's request.
+  work: option<work>,
+}
