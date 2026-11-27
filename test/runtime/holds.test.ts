@@ -135,3 +135,87 @@ each(~key="services", Holds.kind("page", "service"), h => switch Holds.sample(h)
   assert.equal(afterRetract.listening.filter(s => s.name === "Events.events").length, 0,
     "retracting the held fact cancels the branch and drops its nested Events.events stream");
 });
+
+test("sibling spawn does not inherit scope or loop stack when an earlier spawn suspends inside forEach", () => {
+  const source = `open Std
+type site = {domain: string}
+let overview = spawn(~key="overview", () =>
+  every(1d, ~from=2026-11-26T15:00:00Z)->forEach(~key="overview", _ =>
+    ignore(run(@claude, "Overview", ~by=4h)->wait)))
+let reports = spawn(~key="reports", () =>
+  each(Holds.kind("page", "site"), h =>
+    every(1d, ~from=2026-11-26T14:22:00Z)->forEach(~key="round", _ => switch Holds.sample(h) {
+    | Some(s) => ignore(run(@claude, \`Report \${s.domain}\`, ~by=8h)->wait)
+    | None => ()
+    })))
+ignore(all([overview, reports]))`;
+  const checked = checkSource(source, referenceOptions());
+  assert.ok(checked.ok, JSON.stringify(checked.diagnostics));
+  const code = compile(checked.program!, { std });
+  const t = (iso: string) => Date.parse(iso);
+  const { team } = started(code, t("2026-11-26T14:00:00Z"));
+  hold(team.ledger, SITE, "page-a", site("a.example"), t("2026-11-26T14:00:00Z"));
+  hold(team.ledger, SITE, "page-b", site("b.example"), t("2026-11-26T14:00:00Z"));
+
+  const init = team.run();
+  assert.equal(init.status, "waiting");
+  assert.equal(init.nextDue, t("2026-11-26T14:22:00Z"));
+
+  // At 14:22, reports opens requests for both held sites.
+  team.advanceTo(t("2026-11-26T14:22:00Z"));
+  const at1422 = team.run();
+  assert.deepEqual(runs(team), ["Report a.example", "Report b.example"]);
+  assert.equal(at1422.nextDue, t("2026-11-26T15:00:00Z"));
+
+  // At 15:00, overview suspends inside its active forEach round while reports' requests are still open.
+  // reports must remain in root scope (not duplicated under overview, and not unreached/cancelled).
+  team.advanceTo(t("2026-11-26T15:00:00Z"));
+  const at1500 = team.run();
+  assert.equal(at1500.unreached.length, 0, "reports spawn must not become unreached when overview suspends in forEach");
+  assert.deepEqual(runs(team), ["Overview", "Report a.example", "Report b.example"]);
+  const spawnReqs = Object.values(team.ledger.requests).filter(r => r.verb === "spawn");
+  assert.equal(spawnReqs.length, 2, "must not create a duplicate nested reports spawn");
+  assert.deepEqual(spawnReqs.map(r => r.openedBy), ["root", "root"]);
+
+  // Answer overview and both report requests, then advance to the next day's reports tick.
+  team.advanceTo(t("2026-11-26T15:05:00Z"));
+  for (const req of team.open.filter(r => r.verb === "run")) {
+    reply(team, req, answered(report("ok")));
+  }
+  const settled = team.run();
+  assert.equal(settled.nextDue, t("2026-11-27T14:22:00Z"));
+
+  team.advanceTo(t("2026-11-27T14:22:00Z"));
+  team.run();
+  assert.deepEqual(runs(team), ["Report a.example", "Report b.example"]);
+});
+
+test("Together (Std.each) isolates scope, loop, and within deadline stacks across sibling branches", () => {
+  const source = `open Std
+type site = {domain: string}
+each(Holds.kind("page", "site"), h => switch Holds.sample(h) {
+| Some(s) =>
+  if s.domain == "a.example" {
+    every(1d)->forEach(~key="round", _ => within(1h, () => ignore(run(@claude, "Slow A", ~by=8h)->wait)))
+  } else {
+    every(1d)->forEach(~key="round", _ => ignore(run(@claude, "Normal B", ~by=8h)->wait))
+  }
+| None => ()
+})`;
+  const checked = checkSource(source, referenceOptions());
+  assert.ok(checked.ok, JSON.stringify(checked.diagnostics));
+  const { team } = started(compile(checked.program!, { std }), 0);
+  hold(team.ledger, SITE, "page-a", site("a.example"), 0);
+  hold(team.ledger, SITE, "page-b", site("b.example"), 0);
+
+  team.run();
+  team.advanceTo(DAY);
+  team.run();
+  const openRuns = team.open.filter(r => r.verb === "run");
+  assert.deepEqual(openRuns.map(r => r.text).sort(), ["Normal B", "Slow A"]);
+  const reqA = openRuns.find(r => r.text === "Slow A")!;
+  const reqB = openRuns.find(r => r.text === "Normal B")!;
+  assert.equal(reqA.by, DAY + HOUR, "branch A is clamped by its own within(1h)");
+  assert.equal(reqB.by, DAY + 8 * HOUR, "branch B must not inherit branch A's within(1h) deadline");
+  assert.ok(!reqB.scope?.includes(reqA.scope ?? ""), "branch B must keep its own scope independent of branch A");
+});
