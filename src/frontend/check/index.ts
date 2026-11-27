@@ -29,4 +29,3 @@ export {
   type DerivedInterface, type DerivedTypeExport, type DerivedValueExport, type EffectLockDiff, type InterfaceChangeKind, type InterfaceDiff, type ProgramPin, type UpgradeDiff,
 } from "./modules.ts";
 export { checkSource, readInterface, readLibrary, type SourceCheck } from "./source.ts";
-export { checkStandingPolicy, standingPolicySource, type StandingKind } from "./standing.ts";
