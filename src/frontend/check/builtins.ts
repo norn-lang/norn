@@ -146,6 +146,30 @@ export function builtinTable(): TypeTable {
   });
   table.qualifiedTypes.set("Holds.member", holdsMember);
   table.records.push(holdsMember);
+  // Standard capability interface `Admission`: what a host hands an admission policy (spec §10.1).
+  const admissionWork = typeInfo({
+    name: "Admission.work", library: "Admission", visibility: "pub", kind: "record", origin: "builtin", params: [],
+    fields: [
+      { name: "program", type: t.string, decl: null },
+      { name: "digest", type: t.string, decl: null },
+    ],
+    equality: { never: false, params: new Set() },
+  });
+  table.qualifiedTypes.set("Admission.work", admissionWork);
+  table.records.push(admissionWork);
+  const admissionRequest = typeInfo({
+    name: "Admission.request", library: "Admission", visibility: "pub", kind: "record", origin: "builtin", params: [],
+    fields: [
+      { name: "what", type: t.string, decl: null },
+      { name: "target", type: t.string, decl: null },
+      { name: "place", type: t.string, decl: null },
+      { name: "owner", type: t.string, decl: null },
+      { name: "work", type: t.option(con("Admission.work")), decl: null },
+    ],
+    equality: { never: false, params: new Set() },
+  });
+  table.qualifiedTypes.set("Admission.request", admissionRequest);
+  table.records.push(admissionRequest);
   table.qualifiedTypes.set("Actions.prepared", typeInfo({
     name: "Actions.prepared",
     library: "Actions",
@@ -383,6 +407,8 @@ export function builtinModuleExports(): Readonly<Record<string, readonly Builtin
       // Each new value it has, and `None` when it stops having one.
       ["changes", () => { const a = g(); return fun([con("Holds.held", a)], [], t.stream(t.option(a))); }],
     ]),
+    // `Admission` exports types only: a policy reads `Admission.request` and answers the built-in `admission`.
+    Admission: wrap([]),
     Actions: wrap([
       // An action of a connected app, by the app's and the action's name: `Actions.action("x", "post")`.
       ["action", () => { const i = g(), o = g(); return fun([t.string, t.string], [], con("Actions.action", i, o)); }],

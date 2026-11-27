@@ -592,11 +592,19 @@ export type AdmissionDecision =
   | { decision: "AlsoAsk"; participant: string };
 
 /**
- * Evaluates a pure Norn admission policy program (returning a function
- * `requestInfo => Allow | Deny(string) | AlsoAsk(participant)`) against a
- * request record before dispatching it.
+ * Evaluates an admission policy (spec §10.1): a program whose value is a pure
+ * function `asked => Allow | Deny(string) | AlsoAsk(participant)`.
+ *
+ * `asked` is what the host is about to admit. A host that admits something of
+ * its own (the use of a secret, an action) passes the record as a value, an
+ * `Admission.request`; nothing of it is ever written into source text. Given a
+ * ledger request, the policy is handed that request's own fields, for a host
+ * that admits a program's requests before it dispatches them.
+ *
+ * It throws when the policy is not a function, performs an effect, fails, or
+ * answers anything else: the host then admits as it would with no policy.
  */
-export function evaluateAdmissionPolicy(policyCode: Code, request: LedgerRequest, now: number): AdmissionDecision {
+export function evaluateAdmissionPolicy(policyCode: Code, asked: LedgerRequest | Value, now: number): AdmissionDecision {
   const machine = start(policyCode, now);
   advance(policyCode, machine, 100_000);
   if (machine.control.kind !== "done") {
@@ -606,16 +614,16 @@ export function evaluateAdmissionPolicy(policyCode: Code, request: LedgerRequest
   if (fn.type !== "closure" && fn.type !== "builtin") {
     throw new Error("Admission policy must evaluate to a function");
   }
-  const reqVal: Value = {
+  const reqVal: Value = "type" in asked ? asked : {
     type: "record",
     fields: {
-      id: text(request.id),
-      verb: text(request.verb),
-      holder: text(request.holder),
-      text: text(request.text),
-      about: request.about != null ? variant("Some", text(request.about)) : variant("None"),
-      context: request.context != null ? variant("Some", text(request.context)) : variant("None"),
-      openedBy: text(request.openedBy ?? "program"),
+      id: text(asked.id),
+      verb: text(asked.verb),
+      holder: text(asked.holder),
+      text: text(asked.text),
+      about: asked.about != null ? variant("Some", text(asked.about)) : variant("None"),
+      context: asked.context != null ? variant("Some", text(asked.context)) : variant("None"),
+      openedBy: text(asked.openedBy ?? "program"),
     },
   };
   const verdict = runPure(policyCode, fn, reqVal, machine, now);

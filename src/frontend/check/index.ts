@@ -17,7 +17,7 @@ export { CODES, type CheckDiagnostic, type Code, type DiagnosticFix, type Diagno
 export type { EffectSummary } from "./effects.ts";
 export { elaborate, type FormEvidencePlan } from "./elaborate.ts";
 export {
-  ACTIONS_INTERFACE_SOURCE, EVENTS_INTERFACE_SOURCE, manifestActionForm, manifestEventForm, validateActionAgainstManifests,
+  ACTIONS_INTERFACE_SOURCE, ADMISSION_INTERFACE_SOURCE, EVENTS_INTERFACE_SOURCE, manifestActionForm, manifestEventForm, validateActionAgainstManifests,
   validateEventKindAgainstManifests,
   type ConnectorActionSpec, type ConnectorEventSpec, type ConnectorFieldSpec, type ConnectorManifest,
 } from "./events.ts";

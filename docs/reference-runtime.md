@@ -126,6 +126,13 @@ cap.
   taken back is appended to `ledger.delegations`, with its reason. `handOver`
   ends a delegation. A ledger written before delegation existed lacks these
   fields and is read as one in which nobody delegated anything.
+- `evaluateAdmissionPolicy(code, asked, now)` decides one thing a host is
+  about to admit (spec §10.1). `code` is a program whose value is the
+  policy's function; `asked` is an `Admission.request` as a value, or a ledger
+  request, whose fields the policy is then handed. It answers `Allow`, `Deny`
+  with its reason, or `AlsoAsk` with the participant, and throws when the
+  policy has an effect, fails, or answers anything else. It reads and writes
+  no ledger.
 - `establish` records a fact, which then holds; `occur` records one stream
   occurrence. Both refuse timers, `never()` and compositions. A wait on a fact
   that already holds ends at once. A wait on a stream takes the first
