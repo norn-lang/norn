@@ -614,7 +614,8 @@ export function evaluateAdmissionPolicy(policyCode: Code, asked: LedgerRequest |
   if (fn.type !== "closure" && fn.type !== "builtin") {
     throw new Error("Admission policy must evaluate to a function");
   }
-  const reqVal: Value = "type" in asked ? asked : {
+  // A value says what it is; a ledger request has a verb and no type.
+  const reqVal: Value = !("verb" in asked) && typeof asked.type === "string" ? asked : {
     type: "record",
     fields: {
       id: text(asked.id),
